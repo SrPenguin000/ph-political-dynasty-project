@@ -4,17 +4,8 @@
 *.key
 secrets/
 
-# Ignore ALL files and subfolders inside data
-data/*
-!data/raw/
-data/raw/*
-!data/raw/.gitkeep
-!data/staging/
-data/staging/*
-!data/staging/.gitkeep
-!data/curated/
-data/curated/*
-!data/curated/.gitkeep
+# Ignore the entire data directory
+data/
 
 # Safety Net: Block large data files anywhere in the repository
 *.parquet
