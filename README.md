@@ -7,7 +7,7 @@ The system maps familial ties (including multi-hop kinship such as siblings, 1st
 ### Tech Stack
 * **Orchestration:** Apache Airflow
 * **Database & Modeling:** PostgreSQL (Star Schema + Kinship Graph Edges)
-* **Storage Layers:** Medallion Architecture (Raw \(\rightarrow\) Staging \(\rightarrow\) Curated Parquet)
+* **Storage Layers:** Medallion Architecture (Raw > Staging > Curated Parquet)
 * **Graph & Simulation Engine:** NetworkX
 * **Deployment:** Docker & Docker Compose
 * **Exploratory UI:** Streamlit + PyVis
