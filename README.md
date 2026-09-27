@@ -2,7 +2,7 @@
 
 An end-to-end, containerized Data Engineering pipeline that ingests, cleans, models, and analyzes multi-decade Philippine election records and public official datasets. 
 
-The system maps familial ties—including multi-hop kinship such as siblings, 1st cousins, and maternal links—to calculate empirical town-level dynasty stronghold metrics and run network percolation/cascade simulations to test dynasty resilience under systemic political disruptions.
+The system maps familial ties (including multi-hop kinship such as siblings, 1st cousins, and maternal links) to calculate empirical town-level dynasty stronghold metrics and run network percolation/cascade simulations to test dynasty resilience under systemic political disruptions.
 
 ### Tech Stack
 * **Orchestration:** Apache Airflow
