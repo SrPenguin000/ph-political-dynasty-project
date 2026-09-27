@@ -1,0 +1,36 @@
+# Environment & Secrets
+.env
+*.pem
+*.key
+secrets/
+
+# Data Lake Files
+data/raw/*
+!data/raw/.gitkeep
+data/staging/*
+!data/staging/.gitkeep
+data/curated/*
+!data/curated/.gitkeep
+
+# Airflow & Pipeline Logs
+logs/*
+!logs/.gitkeep
+airflow.db
+airflow.cfg
+webserver_config.py
+
+# Python Bytecode & Environments
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+.pytest_cache/
+
+# Notebook Checkpoints & OS Clutter
+.ipynb_checkpoints/
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
