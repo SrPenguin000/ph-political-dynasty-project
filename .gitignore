@@ -4,13 +4,29 @@
 *.key
 secrets/
 
-# Data Lake Files
+# Ignore ALL files and subfolders inside data
+data/*
+!data/raw/
 data/raw/*
 !data/raw/.gitkeep
+!data/staging/
 data/staging/*
 !data/staging/.gitkeep
+!data/curated/
 data/curated/*
 !data/curated/.gitkeep
+
+# Safety Net: Block large data files anywhere in the repository
+*.parquet
+*.csv
+*.tsv
+*.jsonl
+*.zip
+*.tar.gz
+*.7z
+*.db
+*.sqlite
+*.sqlite3
 
 # Airflow & Pipeline Logs
 logs/*
@@ -19,7 +35,7 @@ airflow.db
 airflow.cfg
 webserver_config.py
 
-# Python Bytecode & Environments
+# Python Bytecode & Virtual Environments
 __pycache__/
 *.py[cod]
 *$py.class
