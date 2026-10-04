@@ -8,7 +8,7 @@ def norm_town(name):
     name = name.upper()
     name = re.sub(r"\(.*?\)", "", name)
     name = name.replace("Ñ", "N")
-    name = name.replace("-", " ").replace(".", "").replace("'", "")
+    name = name.replace("-", " ").replace(".", "").replace("'", "").replace("`", "").replace("’", "")
     name = re.sub(r"\s+", " ", name).strip()
     name = re.sub(r"^CITY OF ", "", name)
     name = re.sub(r" CITY$", "", name)
