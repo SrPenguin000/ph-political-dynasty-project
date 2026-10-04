@@ -19,6 +19,20 @@ python src/transform/clean_backfill.py
 
 An optional output folder can be given as an argument. The default is `data/staging`.
 
+```
+python src/transform/clean_backfill.py
+```
+
+An optional output folder can be given as an argument. The default is `data/staging`.
+
+Inside Docker (tested):
+
+```
+docker compose run --rm --no-deps --entrypoint python airflow-scheduler /opt/airflow/src/transform/clean_backfill.py
+```
+
+In the Airflow DAG, this step can be a task that runs `python /opt/airflow/src/transform/clean_backfill.py`, scheduled after the ingest and parse tasks.
+
 ## Outputs
 
 All outputs are parquet files in `data/staging`. Read them with `pd.read_parquet(...)`.
