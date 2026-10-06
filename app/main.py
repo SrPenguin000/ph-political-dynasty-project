@@ -5,13 +5,11 @@ from dotenv import load_dotenv
 import numpy as np
 import pandas as pd
 import streamlit as st
-from sqlalchemy import create_engine
+import psycopg2
 import networkx as nx
 from pyvis.network import Network
 import streamlit.components.v1 as components
 import plotly.express as px
-from sqlalchemy import create_engine, text
-import psycopg2
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 load_dotenv(PROJECT_ROOT / ".env")
@@ -22,11 +20,8 @@ PG_DB = os.getenv("POSTGRES_DB", "dynasty_db")
 PG_PORT = os.getenv("POSTGRES_PORT", "5432")
 PG_HOST = "localhost"
 
-DB_URL = f"postgresql+psycopg2://{PG_USER}:{PG_PASSWORD}@{PG_HOST}:{PG_PORT}/{PG_DB}"
-
 @st.cache_data
 def fetch_data(query: str) -> pd.DataFrame:
-    """Execute SQL query using a raw psycopg2 connection to satisfy pandas."""
     conn = psycopg2.connect(
         host=PG_HOST,
         port=PG_PORT,
@@ -40,9 +35,9 @@ def fetch_data(query: str) -> pd.DataFrame:
         conn.close()
 
 st.set_page_config(page_title="Dynasty Network Resilience Lab", layout="wide", initial_sidebar_state="expanded")
-st.title("Philippine Political Dynasty: Network Resilience & Phase Lab")
+st.title("Philippine Political Dynasty: Network Resilience & Phase Lab 🏛️")
 
-tab_sim, tab_phase, tab_geo = st.tabs(["Cascade Simulator", "Phase Lab (Sensitivity Sweep)", "Geographic Overview"])
+tab_sim, tab_phase, tab_geo = st.tabs(["Cascade Simulator 🌊", "Phase Lab (Sensitivity Sweep) 🔬", "Geographic Overview 🗺️"])
 
 with tab_sim:
     st.subheader("Network Cascade & Disruption Simulator")
@@ -54,14 +49,18 @@ with tab_sim:
         st.markdown("### Disruption Parameters")
         
         prov_list = fetch_data("SELECT DISTINCT province_std FROM dim_geography WHERE province_std IS NOT NULL ORDER BY province_std")["province_std"].tolist()
-        selected_province = st.selectbox("Province Focus", prov_list, index=prov_list.index("MAGUINDANAO") if "MAGUINDANAO" in prov_list else 0)
+        selected_province = st.selectbox("Province Focus", prov_list, index=prov_list.index("NCR SECOND DISTRICT") if "NCR SECOND DISTRICT" in prov_list else 0)
+
+        pos_query = "SELECT DISTINCT position FROM fact_electoral_membership WHERE position IS NOT NULL ORDER BY position"
+        pos_list = fetch_data(pos_query)["position"].tolist()
+        selected_positions = st.multiselect("Electoral Positions", options=pos_list, default=pos_list)
 
         disruption_mode = st.radio("Intervention / Attack Strategy", ["Targeted (Top Hubs / Strongest Dynasties)", "Random Disqualification", "Degree-Based Threshold"])
         disruption_pct = st.slider("Disruption Intensity (% Nodes Removed)", 0, 80, 20, step=5)
         k_core = st.slider("Core Entrenchment Filter (k-core)", 0, 5, 0, help="Filter out periphery single-term candidates")
 
     with col_graph:
-        query = f"""
+        base_query = f"""
         SELECT 
             p.last_name, 
             p.first_name, 
@@ -70,17 +69,48 @@ with tab_sim:
         FROM fact_electoral_membership f
         JOIN dim_person p ON f.person_id = p.person_id
         JOIN dim_geography g ON f.location_id = g.location_id
-        WHERE g.province_std = '{selected_province}' AND f.year >= 2010
+        WHERE g.province_std = '{selected_province}'
         """
-        raw_net = fetch_data(query)
+        
+        if selected_positions:
+            pos_formatted = "', '".join(selected_positions)
+            base_query += f" AND f.position IN ('{pos_formatted}')"
+        else:
+            base_query += " AND 1=0"
+            
+        raw_net = fetch_data(base_query)
 
         if not raw_net.empty:
+            min_year = int(raw_net['year'].min())
+            max_year = int(raw_net['year'].max())
+            st.info(f"📅 **Data Timeframe Displayed:** {min_year} – {max_year}")
+            
+            raw_net['cand_name'] = raw_net['first_name'] + " " + raw_net['last_name']
+            cand_wins = raw_net['cand_name'].value_counts().to_dict()
+            family_wins = raw_net['last_name'].value_counts().to_dict()
+
             G = nx.Graph()
-            for _, r in raw_net.iterrows():
+            
+            for family, f_wins in family_wins.items():
+                f_size = 20 + (f_wins * 2.5) 
+                G.add_node(family, node_type="dynasty", size=f_size, 
+                           title=f"Dynasty: {family}\nTotal Seats Held: {f_wins}",
+                           color={"background": "rgba(231, 76, 60, 0.3)", "border": "rgba(231, 76, 60, 0.1)", 
+                                  "highlight": {"background": "rgba(231, 76, 60, 1)", "border": "white"},
+                                  "hover": {"background": "rgba(231, 76, 60, 1)", "border": "white"}})
+                
+            unique_edges = raw_net[['last_name', 'cand_name']].drop_duplicates()
+            for _, r in unique_edges.iterrows():
                 family = r['last_name']
-                cand = f"{r['first_name']} {r['last_name']}"
-                G.add_node(family, node_type="dynasty", size=24, color="#e74c3c")
-                G.add_node(cand, node_type="candidate", size=12, color="#3498db")
+                cand = r['cand_name']
+                c_wins = cand_wins[cand]
+                c_size = 10 + (c_wins * 2.5) 
+                
+                G.add_node(cand, node_type="candidate", size=c_size, 
+                           title=f"Candidate: {cand}\nTerms Won: {c_wins}",
+                           color={"background": "rgba(52, 152, 219, 0.3)", "border": "rgba(52, 152, 219, 0.1)", 
+                                  "highlight": {"background": "rgba(52, 152, 219, 1)", "border": "white"},
+                                  "hover": {"background": "rgba(52, 152, 219, 1)", "border": "white"}})
                 G.add_edge(family, cand)
 
             if k_core > 0:
@@ -109,10 +139,37 @@ with tab_sim:
             net = Network(height="550px", width="100%", bgcolor="#0e1117", font_color="white")
             net.from_nx(G)
             
-            net.repulsion(node_distance=150, central_gravity=0.05, spring_length=120)
-            for edge in net.edges:
-                edge['color'] = '#555555'
-                
+            net.set_options("""
+            var options = {
+              "edges": {
+                "color": {
+                  "color": "rgba(100, 100, 100, 0.05)",
+                  "highlight": "rgba(255, 255, 255, 1)",
+                  "hover": "rgba(255, 255, 255, 0.8)",
+                  "inherit": false
+                },
+                "smooth": false
+              },
+              "physics": {
+                "forceAtlas2Based": {
+                  "gravitationalConstant": -80,
+                  "centralGravity": 0.01,
+                  "springLength": 100,
+                  "springConstant": 0.08
+                },
+                "maxVelocity": 50,
+                "solver": "forceAtlas2Based",
+                "timestep": 0.35,
+                "stabilization": {"iterations": 150}
+              },
+              "interaction": {
+                "hover": true,
+                "selectConnectedEdges": true,
+                "hoverConnectedEdges": true
+              }
+            }
+            """)
+            
             tmp_path = PROJECT_ROOT / "app" / "tmp_cascade.html"
             net.save_graph(str(tmp_path))
             with open(tmp_path, "r", encoding="utf-8") as f:
@@ -182,7 +239,6 @@ with tab_geo:
         JOIN dim_person p ON f.person_id = p.person_id
         JOIN dim_geography g ON f.location_id = g.location_id
         LEFT JOIN fact_poverty_metric pov ON g.location_id = pov.location_id AND pov.year = 2018
-        WHERE f.year >= 2010
         GROUP BY g.province_std
         ORDER BY unique_surnames DESC
     """)
