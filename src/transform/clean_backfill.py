@@ -3,6 +3,7 @@
 Reads raw and staging inputs, standardizes names and places, fills missing
 localities in HF memberships, and writes cleaned tables to data/staging.
 """
+
 import re
 import sys
 from pathlib import Path
@@ -18,7 +19,9 @@ from src.transform.mappings import (
     PSA_AREA_MAP, PSA_CITY_MAP, ROSTER_CITY_MAP, ROSTER_MISSING_PROVINCE,
     ROSTER_PROVINCE_MAP, TOWN_MAP,
 )
-from src.transform.normalize import name_key, name_tokens, norm_town
+from src.transform.normalize import (
+    first_names_compatible, middle_names_agree, name_key, name_tokens, norm_town,
+)
 
 RAW = PROJECT_ROOT / "data" / "raw"
 STAGING = PROJECT_ROOT / "data" / "staging"
@@ -29,6 +32,7 @@ XKEYS = ["province_std", "last_key"]  # cross-year match
 RELIABLE_YEARS = [2001, 2004, 2007, 2016, 2019, 2022, 2025]
 MAX_TOWN_OFFICIALS = 16  # more than this in one OpenHalalan 2013 town = doubled by the shift
 SHIFTED_YEARS = [2010, 2013]  # OpenHalalan years with the town-label shift
+JOB_WORDS = {"MAYOR", "VICEMAYOR", "COUNCILOR", "GOVERNOR", "VICEGOVERNOR", "KAGAWAD", "BOARDMEMBER"}
 
 
 def apply_town_maps(towns, provinces):
@@ -141,7 +145,6 @@ def backfill_localities(memberships, persons, winners):
     # Whatever is left could not be filled
     df["locality_source"] = df["locality_source"].fillna("unfilled")
     return df.drop(columns="history_town")
-
 
 
 def clean_persons(persons):
@@ -290,9 +293,135 @@ def clean_roster(roster, winners_std):
     df["first_key"] = df["first_name"].map(name_key, na_action="ignore")
     return df
 
+def _split_id_pairs(persons, memberships, years):
+    """HF ID pairs that may be one person: same province, surname key, and suffix,
+    compatible first names, and never in office in the same year."""
+    pp = memberships[["person_id", "province_std"]].drop_duplicates().merge(
+        persons[["id", "first_name", "last_key", "name_suffix"]], left_on="person_id", right_on="id"
+    )
+    pp["suffix"] = pp["name_suffix"].fillna("")
+    pairs = pp.merge(pp, on=["province_std", "last_key", "suffix"], suffixes=("_a", "_b"))
+    pairs = pairs[pairs["person_id_a"] < pairs["person_id_b"]]
+    pairs = pairs.drop_duplicates(["person_id_a", "person_id_b"])
+    keep = [first_names_compatible(a, b) for a, b in zip(pairs["first_name_a"], pairs["first_name_b"])]
+    pairs = pairs.loc[keep]
+    apart = [not (years[a] & years[b]) for a, b in zip(pairs["person_id_a"], pairs["person_id_b"])]
+    return pairs.loc[apart, ["person_id_a", "person_id_b", "first_name_a", "first_name_b"]].reset_index(drop=True)
+
+
+def _hf_middle_names(persons, memberships, winners_clean):
+    """Most common OpenHalalan middle-name key for each HF person, matched by election, surname, and a shared first-name word."""
+    oh = winners_clean[winners_clean["year"].isin(memberships["year"].unique()) & winners_clean["middle_name"].notna()].copy()
+    oh["last_key"] = oh["last_name"].map(name_key, na_action="ignore")
+    oh["middle_key"] = oh["middle_name"].str.split().str[-1].map(name_key, na_action="ignore")
+
+    hf = memberships.merge(persons[["id", "first_name", "last_key"]], left_on="person_id", right_on="id", suffixes=("", "_p"))
+    keys = ["year", "position", "province_std", "last_key"]
+    cand = hf.merge(oh[keys + ["first_name", "middle_key"]], on=keys, suffixes=("", "_oh"))
+    shared = [bool(name_tokens(a) & name_tokens(b)) for a, b in zip(cand["first_name"], cand["first_name_oh"])]
+    cand = cand.loc[shared]
+    cand = cand[cand.groupby("id")["middle_key"].transform("size") == 1]
+    return cand.groupby("person_id")["middle_key"].agg(lambda s: s.mode().iloc[0])
+
+
+def _usable_middle(mid, words):
+    """A real middle name: longer than one letter, not a job title, not a word from the first names."""
+    return isinstance(mid, str) and len(mid) > 1 and mid not in words and mid not in JOB_WORDS
+
+
+def _pair_evidence(pairs, person_mid):
+    """'agree', 'conflict', or 'unknown' for each pair, from OpenHalalan middle names."""
+    evidence = []
+    for pa, pb, fa, fb in zip(pairs["person_id_a"], pairs["person_id_b"], pairs["first_name_a"], pairs["first_name_b"]):
+        words = name_tokens(fa) | name_tokens(fb)
+        ma, mb = person_mid.get(pa), person_mid.get(pb)
+        if not (_usable_middle(ma, words) and _usable_middle(mb, words)):
+            evidence.append("unknown")
+        elif middle_names_agree(ma, mb):
+            evidence.append("agree")
+        else:
+            evidence.append("conflict")
+    return evidence
+
+
+def resolve_persons(persons, memberships, winners_clean):
+    """Merge HF person IDs that belong to one person written differently.
+
+    Returns (persons_merged, id_map). persons_merged has one row per person. id_map links every
+    original HF id (person_id_raw) to its merged id (person_uid) and the evidence for the merge.
+    """
+    years = memberships.groupby("person_id")["year"].apply(set)
+    pairs = _split_id_pairs(persons, memberships, years)
+    person_mid = _hf_middle_names(persons, memberships, winners_clean)
+    pairs["evidence"] = _pair_evidence(pairs, person_mid)
+    accepted = pairs[pairs["evidence"].isin(["agree", "unknown"])]
+
+    # Union-find: join every accepted pair into groups
+    parent = {pid: pid for pid in persons["id"]}
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for a, b in zip(accepted["person_id_a"], accepted["person_id_b"]):
+        parent[find(a)] = find(b)
+    group = pd.Series({pid: find(pid) for pid in parent})
+
+    # Safeguard: undo groups with members in office the same year or conflicting middle names
+    first_words = persons.set_index("id")["first_name"].map(name_tokens)
+    for members in group.groupby(group).groups.values():
+        members = list(members)
+        if len(members) < 2:
+            continue
+        yrs = [years.get(m, set()) for m in members]
+        words = set().union(*(first_words.get(m, set()) for m in members))
+        mids = [x for x in (person_mid.get(m) for m in members) if _usable_middle(x, words)]
+        overlap = sum(len(y) for y in yrs) != len(set().union(*yrs))
+        conflict = not all(middle_names_agree(x, y) for i, x in enumerate(mids) for y in mids[i + 1:])
+        if overlap or conflict:
+            group[members] = members
+
+    # One merged id per group: the member with the most terms (ties: smallest id)
+    info = pd.DataFrame({"person_id_raw": group.index, "group": group.values})
+    info["n_rows"] = info["person_id_raw"].map(memberships["person_id"].value_counts()).fillna(0)
+    info = info.sort_values(["group", "n_rows", "person_id_raw"], ascending=[True, False, True])
+    info["person_uid"] = info.groupby("group")["person_id_raw"].transform("first")
+    info["n_ids"] = info.groupby("group")["person_id_raw"].transform("size")
+
+    # Evidence label: 'name_only' if any merge in the group lacked middle-name confirmation
+    same_group = accepted["person_id_a"].map(group) == accepted["person_id_b"].map(group)
+    used = accepted[same_group]
+    name_only = set(used.loc[used["evidence"].eq("unknown"), "person_id_a"].map(group))
+    info["merge_evidence"] = None
+    multi = info["n_ids"] > 1
+    info.loc[multi, "merge_evidence"] = "middle_name_agree"
+    info.loc[multi & info["group"].isin(name_only), "merge_evidence"] = "name_only"
+    id_map = info[["person_id_raw", "person_uid", "n_ids", "merge_evidence"]].reset_index(drop=True)
+
+    # One row per person, with one display name
+    p = persons.merge(id_map, left_on="id", right_on="person_id_raw")
+    p["n_words"] = p["first_name"].str.split().str.len()
+    p["name_len"] = p["first_name"].str.len()
+    p["has_enye"] = p["last_name"].str.contains("ñ", case=False)
+    best_first = p.sort_values(["n_words", "name_len"], ascending=False).drop_duplicates("person_uid").set_index("person_uid")["first_name"]
+    best_last = p.sort_values("has_enye", ascending=False).drop_duplicates("person_uid").set_index("person_uid")["last_name"]
+    variants = (p["first_name"] + " " + p["last_name"]).groupby(p["person_uid"]).agg(lambda s: " | ".join(sorted(set(s))))
+
+    merged = p[p["id"].eq(p["person_uid"])].drop(columns=["person_id_raw", "person_uid", "n_words", "name_len", "has_enye"])
+    merged = merged.set_index("id")
+    merged["first_name"] = best_first
+    merged["last_name"] = best_last
+    merged["suffix_suspect"] = p.groupby("person_uid")["suffix_suspect"].any()
+    merged["name_variants"] = variants
+    merged["first_key"] = merged["first_name"].map(name_key)
+    merged["last_key"] = merged["last_name"].map(name_key)
+    return merged.reset_index(), id_map
+
 
 def main(out_dir=STAGING):
-    """Read all inputs, clean them, backfill localities, and write the cleaned tables."""
+    """Read all inputs, clean them, backfill localities, merge split person IDs, and write the cleaned tables."""
     persons_raw = pd.read_parquet(RAW / "hf_persons.parquet")
     memberships_raw = pd.read_parquet(RAW / "hf_memberships.parquet")
     winners_raw = pd.read_csv(RAW / "openhalalan_winners.csv")
@@ -300,12 +429,20 @@ def main(out_dir=STAGING):
     roster_raw = pd.read_csv(STAGING / "roster_legislators.csv")
 
     winners_std = standardize_winners(winners_raw)
+    winners_clean = clean_winners(winners_std)
     persons = clean_persons(persons_raw)
     memberships = backfill_localities(standardize_memberships(memberships_raw), persons, winners_std)
+
+    # Merge split person IDs. Memberships keep the original id in person_id_raw.
+    persons_merged, id_map = resolve_persons(persons, memberships, winners_clean)
+    memberships["person_id_raw"] = memberships["person_id"]
+    memberships["person_id"] = memberships["person_id_raw"].map(id_map.set_index("person_id_raw")["person_uid"])
+
     outputs = {
-        "hf_persons_clean": persons,
+        "hf_persons_clean": persons_merged,
+        "hf_person_id_map": id_map,
         "hf_memberships_clean": memberships,
-        "openhalalan_winners_clean": clean_winners(winners_std),
+        "openhalalan_winners_clean": winners_clean,
         "psa_poverty_clean": clean_psa(poverty_raw),
         "roster_legislators_clean": clean_roster(roster_raw, winners_std),
     }
@@ -316,9 +453,10 @@ def main(out_dir=STAGING):
         df.to_parquet(path, index=False)
         print(f"{name}: {len(df):,} rows -> {path}")
 
+    print(f"\npeople: {len(persons):,} HF IDs -> {len(persons_merged):,} after merging split IDs")
     print("\nlocality_source:")
     print(memberships["locality_source"].value_counts().to_string())
-
+    
 
 if __name__ == "__main__":
     main(Path(sys.argv[1]) if len(sys.argv) > 1 else STAGING)
