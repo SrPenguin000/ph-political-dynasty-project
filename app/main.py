@@ -18,7 +18,7 @@ PG_USER = os.getenv("POSTGRES_USER", "postgres")
 PG_PASSWORD = os.getenv("POSTGRES_PASSWORD", "postgres")
 PG_DB = os.getenv("POSTGRES_DB", "dynasty_db")
 PG_PORT = os.getenv("POSTGRES_PORT", "5432")
-PG_HOST = "localhost"
+PG_HOST = os.getenv("POSTGRES_HOST", "postgres")
 
 @st.cache_data
 def fetch_data(query: str) -> pd.DataFrame:
@@ -35,9 +35,9 @@ def fetch_data(query: str) -> pd.DataFrame:
         conn.close()
 
 st.set_page_config(page_title="Dynasty Network Resilience Lab", layout="wide", initial_sidebar_state="expanded")
-st.title("Philippine Political Dynasty: Network Resilience & Phase Lab 🏛️")
+st.title("Philippine Political Dynasty: Network Resilience & Phase Lab")
 
-tab_sim, tab_phase, tab_geo = st.tabs(["Cascade Simulator 🌊", "Phase Lab (Sensitivity Sweep) 🔬", "Geographic Overview 🗺️"])
+tab_sim, tab_phase, tab_geo = st.tabs(["Cascade Simulator", "Phase Lab (Sensitivity Sweep)", "Geographic Overview"])
 
 with tab_sim:
     st.subheader("Network Cascade & Disruption Simulator")
@@ -83,7 +83,7 @@ with tab_sim:
         if not raw_net.empty:
             min_year = int(raw_net['year'].min())
             max_year = int(raw_net['year'].max())
-            st.info(f"📅 **Data Timeframe Displayed:** {min_year} – {max_year}")
+            st.info(f"**Data Timeframe Displayed:** {min_year} – {max_year}")
             
             raw_net['cand_name'] = raw_net['first_name'] + " " + raw_net['last_name']
             cand_wins = raw_net['cand_name'].value_counts().to_dict()

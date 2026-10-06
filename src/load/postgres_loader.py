@@ -71,7 +71,13 @@ class PostgresLoader:
                 """)
                 conn.execute(query, row)
 
-        geo_df = pd.read_sql("SELECT location_id, province_std, town_std FROM dim_geography;", self.engine)
+        # Extract the raw DBAPI connection and close it manually
+        raw_conn = self.engine.raw_connection()
+        try:
+            geo_df = pd.read_sql("SELECT location_id, province_std, town_std FROM dim_geography;", con=raw_conn)
+        finally:
+            raw_conn.close()
+            
         geo_map = {
             (r["province_std"], r["town_std"]): r["location_id"]
             for _, r in geo_df.iterrows()

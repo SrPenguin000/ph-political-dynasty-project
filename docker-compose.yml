@@ -83,7 +83,8 @@ services:
     container_name: dynasty_dashboard
     env_file:
       - .env
-    command: streamlit run /opt/airflow/app/dashboard.py --server.port=8501 --server.address=0.0.0.0
+    entrypoint: ["streamlit", "run"]
+    command: ["/opt/airflow/app/main.py", "--server.port=8501", "--server.address=0.0.0.0"]
     ports:
       - "8501:8501"
     volumes:
