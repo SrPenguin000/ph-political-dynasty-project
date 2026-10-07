@@ -15,12 +15,14 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.transform.mappings import (
-    HF_PROVINCE_MAP, ORDINAL_WORDS, PERIOD_MAP, PERIOD_TYPO_MAP, PROVINCE_TOWN_MAP,
+    ATENEO_PLACE_FIXES, ATENEO_PROVINCE_MAP, HF_PROVINCE_MAP, HISTORICAL_TOWNS, NCR_DISTRICT_OF_TOWN,
+    ORDINAL_WORDS, PERIOD_MAP, PERIOD_TYPO_MAP, PROVINCE_GROUP, PROVINCE_TOWN_MAP,
     PSA_AREA_MAP, PSA_CITY_MAP, ROSTER_CITY_MAP, ROSTER_MISSING_PROVINCE,
     ROSTER_PROVINCE_MAP, TOWN_MAP,
 )
 from src.transform.normalize import (
-    first_names_compatible, middle_names_agree, name_key, name_tokens, norm_town,
+    first_names_compatible, fix_mojibake, fix_ocr_digits, middle_names_agree, name_key,
+    name_tokens, norm_town, split_suffix,
 )
 
 RAW = PROJECT_ROOT / "data" / "raw"
@@ -36,11 +38,11 @@ JOB_WORDS = {"MAYOR", "VICEMAYOR", "COUNCILOR", "GOVERNOR", "VICEGOVERNOR", "KAG
 
 
 def apply_town_maps(towns, provinces):
-    """Standardize town names: norm_town, then TOWN_MAP, then PROVINCE_TOWN_MAP."""
+    """Standardize town names: norm_town, then TOWN_MAP, then PROVINCE_TOWN_MAP (keyed by province group)."""
     std = towns.map(norm_town, na_action="ignore").replace(TOWN_MAP)
-    for (prov, town), new in PROVINCE_TOWN_MAP.items():
-        std = std.mask(provinces.eq(prov) & std.eq(town), new)
-    return std
+    groups = provinces.replace(PROVINCE_GROUP)
+    fixed = pd.Series([PROVINCE_TOWN_MAP.get(pair) for pair in zip(groups, std)], index=std.index)
+    return std.mask(fixed.notna(), fixed)
 
 
 def standardize_memberships(memberships):
@@ -418,6 +420,86 @@ def resolve_persons(persons, memberships, winners_clean):
     merged["first_key"] = merged["first_name"].map(name_key)
     merged["last_key"] = merged["last_name"].map(name_key)
     return merged.reset_index(), id_map
+
+def known_town_pairs(memberships_clean, winners_clean):
+    """(province_group, town) pairs of real towns: in HF or OpenHalalan town-level rows, or historical."""
+    hf = memberships_clean[memberships_clean["position"].isin(TOWN_POSITIONS) & memberships_clean["locality_source"].eq("original")]
+    oh = winners_clean[winners_clean["position"].isin(TOWN_POSITIONS) & ~winners_clean["town_shift_suspect"] & winners_clean["town_std"].notna()]
+    pairs = set(zip(hf["province_std"].replace(PROVINCE_GROUP), hf["locality_std"]))
+    pairs |= set(zip(oh["province_std"].replace(PROVINCE_GROUP), oh["town_std"]))
+    return pairs | HISTORICAL_TOWNS
+
+
+def clean_ateneo_politicians(ateneo, known_towns):
+    """Ateneo politicians with repaired text, standard provinces and towns, split names, and flags."""
+    df = ateneo.copy()
+    df.columns = [c.lower() for c in df.columns]
+    df.insert(0, "ateneo_row_id", [f"AT-{i:06d}" for i in range(len(df))])
+    for col in ["first_name", "last_name", "party", "municipality"]:
+        df[col] = df[col].map(fix_mojibake)
+
+    # Towns: only town-level positions have one ("---" and other text without letters counts as missing)
+    is_town = df["position"].isin(TOWN_POSITIONS)
+    muni = df["municipality"].where(is_town & df["municipality"].str.contains("[A-Z]", case=False, na=False))
+    df["province_std"] = df["province"].replace(ATENEO_PROVINCE_MAP)
+    town = apply_town_maps(muni, df["province_std"])
+    town = town.mask(df["province_std"].eq("NCR FIRST DISTRICT") & town.notna(), "MANILA")
+
+    # Places: the NCR district follows the city, then fixes for rows filed under the wrong place in one election
+    district = town.map(NCR_DISTRICT_OF_TOWN).where(df["province_std"].str.startswith("NCR"))
+    df["province_std"] = district.fillna(df["province_std"])
+    hits = [(df["year"].eq(y) & df["province_std"].eq(p) & town.eq(t), right) for (y, p, t), right in ATENEO_PLACE_FIXES.items()]
+    for hit, (right_province, right_town) in hits:  # all rows are found first, so swapped labels don't undo each other
+        df.loc[hit, "province_std"] = right_province
+        town = town.mask(hit, right_town)
+    df["province_group"] = df["province_std"].replace(PROVINCE_GROUP)
+
+    df["town_std"] = town
+    pairs = zip(df["province_group"], town)
+    df["town_verified"] = pd.Series([pair in known_towns for pair in pairs], index=df.index).where(town.notna())
+    df["town_source"] = "not_applicable"
+    df.loc[is_town & town.notna(), "town_source"] = "original"
+    df.loc[is_town & town.isna(), "town_source"] = "unfilled"
+
+    # Names: suffixes, scanning errors, match keys
+    first = df["first_name"].str.upper().str.replace(r"\s+", " ", regex=True).str.strip().map(fix_ocr_digits)
+    last = df["last_name"].str.upper().str.replace(r"\s+", " ", regex=True).str.strip().map(fix_ocr_digits)
+    first_split = [split_suffix(f, glued_ok=(y == 2019)) for f, y in zip(first, df["year"])]
+    last_split = [split_suffix(n) for n in last]
+    df["first_name_std"] = [f for f, _ in first_split]
+    df["last_name_std"] = [n for n, _ in last_split]
+    suffix = pd.Series([s for _, s in first_split], index=df.index)
+    df["name_suffix"] = suffix.fillna(pd.Series([s for _, s in last_split], index=df.index))
+    odd = r"[0-9;!?_|]"
+    df["name_suspect"] = df["first_name"].str.contains(odd, na=False) | df["last_name"].str.contains(odd, na=False)
+    df["first_key"] = df["first_name_std"].map(name_key, na_action="ignore")
+    df["last_key"] = df["last_name_std"].map(name_key)
+
+    # Flags
+    key = ["year", "position", "province", "municipality", "first_name", "last_name"]
+    df["is_duplicate"] = df.duplicated(key)
+    df["is_fat_dynasty"] = df["fat_dynasty_indicator"].eq("fat")
+    return df
+
+def split_doubled_towns(ateneo_clean, winners_std):
+    """Fix Ateneo town-years that hold two towns' officials.
+
+    In 2001, Ateneo put the officials of a town named like its province (e.g. QUEZON, Quezon) under
+    the town listed before it, so that town shows twice the usual officials. In town-years with more
+    officials than MAX_TOWN_OFFICIALS, each official takes the town OpenHalalan records for them in the
+    same election (the HF backfill matcher). winners_std is OpenHalalan from standardize_winners.
+    """
+    df = ateneo_clean.copy()
+    has_town = df["town_source"].eq("original")
+    size = df[has_town].groupby(["year", "province_std", "town_std"])["ateneo_row_id"].transform("size")
+    rows = df.loc[size[size > MAX_TOWN_OFFICIALS].index, ["ateneo_row_id", *KEYS, "first_key", "first_name_std"]]
+    rows = rows.rename(columns={"ateneo_row_id": "id", "first_name_std": "first_name"})
+    found = match_towns(rows, prep_oh(winners_std, RELIABLE_YEARS))
+    town = df["ateneo_row_id"].map(found["town"])
+    fix = town.notna() & town.ne(df["town_std"])
+    df.loc[fix, "town_std"] = town[fix]
+    df.loc[fix, "town_source"] = "openhalalan_" + df.loc[fix, "ateneo_row_id"].map(found["tier"])
+    return df
 
 
 def main(out_dir=STAGING):

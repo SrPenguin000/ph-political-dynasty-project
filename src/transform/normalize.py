@@ -61,3 +61,46 @@ def middle_names_agree(a, b):
     if a == b or a.startswith(b) or b.startswith(a):
         return True
     return SequenceMatcher(None, a, b).ratio() >= 0.8
+def fix_mojibake(text):
+    """Repair text whose UTF-8 bytes were read as Windows-1252, like the broken enye in some town names."""
+    if not isinstance(text, str):
+        return text
+    try:
+        return text.encode("cp1252").decode("utf-8")
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        return text
+
+
+def fix_ocr_digits(name):
+    """Fix digits a scanner read instead of letters: 0 next to a letter -> O, 1 before a letter -> I."""
+    if not isinstance(name, str):
+        return name
+    name = re.sub(r"(?<=[A-Z])0|0(?=[A-Z])", "O", name)
+    return re.sub(r"1(?=[A-Z])", "I", name)
+
+
+SPACED_SUFFIX_RE = re.compile(r"\s+(JR|SR|II|III|IV|VI|VII|VIII)\.?$")
+GLUED_DOT_SUFFIX_RE = re.compile(r"(?<=[A-Z]{3})(JR|SR)\.$")
+GLUED_SUFFIX_RE = re.compile(r"(?<=[A-Z]{3})(JR|SR|III|II|IV)\.?$")
+SUFFIX_LABELS = {"JR": "Jr.", "SR": "Sr."}
+
+
+def split_suffix(name, glued_ok=False):
+    """Split trailing suffixes off an uppercase name: 'JOSE JR.' -> ('JOSE', 'Jr.').
+
+    glued_ok=True also splits suffixes written without a space and without a period
+    ('ADOLFOJR'); use it only where spaces are known to be missing (2019).
+    """
+    if not isinstance(name, str):
+        return name, None
+    name = re.sub(r"\s111$", " III", name.strip())
+    found = []
+    for _ in range(2):
+        m = SPACED_SUFFIX_RE.search(name) or GLUED_DOT_SUFFIX_RE.search(name)
+        if not m and glued_ok:
+            m = GLUED_SUFFIX_RE.search(name)
+        if not m:
+            break
+        found.insert(0, SUFFIX_LABELS.get(m.group(1), m.group(1)))
+        name = name[: m.start()].strip()
+    return name, (" ".join(found) if found else None)
