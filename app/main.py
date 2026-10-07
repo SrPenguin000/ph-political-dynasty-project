@@ -82,6 +82,7 @@ with tab_sim:
             p.first_name, 
             f.position, 
             f.year,
+            g.town_std AS locality_std,
             pc.clan_id,
             c.clan_surname,
             c.n_members AS clan_size
@@ -107,15 +108,21 @@ with tab_sim:
             st.info(f"**Data Timeframe Displayed:** {min_year} – {max_year}")
             
             raw_net['cand_name'] = raw_net['first_name'] + " " + raw_net['last_name']
+            raw_net['locality_std'] = raw_net['locality_std'].fillna("Provincial / District Wide")
 
-            # Aggregate per real person (person_id), not per name text -- a
-            # politician re-elected several times should count once, and two
-            # different people who happen to share a name should never merge.
             per_person = raw_net.drop_duplicates(subset=['person_id']).set_index('person_id')
             cand_wins = raw_net.groupby('person_id').size().to_dict()
 
-            # Clan info is already validated (same paternal line) -- no
-            # re-deriving "family" from last_name text here.
+            # 1. Candidate Tooltips (Blue Nodes): Full record of won election years and positions
+            candidate_histories = {}
+            for pid, group in raw_net.groupby('person_id'):
+                sorted_records = group.sort_values(by='year')
+                history_lines = [
+                    f"• {int(row['year'])}: {row['position']} ({row['locality_std']})"
+                    for _, row in sorted_records.iterrows()
+                ]
+                candidate_histories[pid] = "\n".join(history_lines)
+
             clan_info = (
                 per_person.dropna(subset=['clan_id'])
                 .groupby('clan_id')
@@ -123,41 +130,118 @@ with tab_sim:
             )
             qualifying_clans = set(clan_info[clan_info['clan_size'] >= dynasty_threshold].index)
 
+            # 2. Nationwide Clan Query: Pull ALL members across all Philippine provinces for these clans
+            clan_member_breakdowns = {}
+            clan_actual_member_counts = {}
+            
+            if qualifying_clans:
+                clan_ids_str = "', '".join(qualifying_clans)
+                nw_query = f"""
+                SELECT 
+                    pc.clan_id,
+                    p.person_id,
+                    p.first_name,
+                    p.last_name,
+                    g.province_std,
+                    g.town_std AS locality_std,
+                    f.position,
+                    f.year
+                FROM fact_person_clan pc
+                JOIN dim_person p ON pc.person_id = p.person_id
+                LEFT JOIN fact_electoral_membership f ON p.person_id = f.person_id
+                LEFT JOIN dim_geography g ON f.location_id = g.location_id
+                WHERE pc.clan_id IN ('{clan_ids_str}')
+                """
+                nw_df = fetch_data(nw_query)
+                nw_df['locality_std'] = nw_df['locality_std'].fillna("Provincial Wide")
+                nw_df['province_std'] = nw_df['province_std'].fillna("Unknown Province")
+                nw_df['full_name'] = nw_df['first_name'] + " " + nw_df['last_name']
+
+                for cid in qualifying_clans:
+                    c_rows = nw_df[nw_df['clan_id'] == cid]
+                    
+                    # Count distinct individuals
+                    clan_actual_member_counts[cid] = c_rows['person_id'].nunique()
+                    
+                    members_summary = []
+                    for pid, p_group in c_rows.groupby('person_id'):
+                        p_name = p_group['full_name'].iloc[0]
+                        positions = ", ".join(filter(None, p_group['position'].dropna().unique())) or "Elected Official"
+                        
+                        places = set()
+                        for _, r in p_group.iterrows():
+                            if r['locality_std'] != "Provincial Wide":
+                                places.add(f"{r['province_std']} - {r['locality_std']}")
+                            else:
+                                places.add(r['province_std'])
+                        place_str = "; ".join(sorted(places)) if places else "Jurisdiction unlisted"
+                        
+                        members_summary.append(f"• {p_name} — {positions} [{place_str}]")
+                    
+                    clan_member_breakdowns[cid] = "\n".join(members_summary)
+
             G = nx.Graph()
 
+            # 3. Build Clan (Red) Nodes with Corrected Dual-Metric Tooltip
             for clan_id in qualifying_clans:
                 row = clan_info.loc[clan_id]
                 f_size = 20 + (row['clan_size'] * 2.5)
-                G.add_node(
-                    clan_id, node_type="dynasty", size=f_size,
-                    label=str(row['clan_surname']),
-                    title=f"Clan: {row['clan_surname']} ({clan_id})\nValidated Members: {int(row['clan_size'])}",
-                    color={"background": "rgba(231, 76, 60, 0.3)", "border": "rgba(231, 76, 60, 0.1)",
-                           "highlight": {"background": "rgba(231, 76, 60, 1)", "border": "white"},
-                           "hover": {"background": "rgba(231, 76, 60, 1)", "border": "white"}},
+                
+                all_nationwide_members = clan_member_breakdowns.get(clan_id, "No members found")
+                actual_members = clan_actual_member_counts.get(clan_id, 0)
+                
+                tooltip_clan = (
+                    f"CLAN: {row['clan_surname']} ({clan_id})\n"
+                    f"Total Individual Politicians: {actual_members}\n"
+                    f"Total Elections Won: {int(row['clan_size'])}\n"
+                    f"=========================================\n"
+                    f"ALL NATIONWIDE MEMBERS, SEATS & LOCATIONS:\n"
+                    f"{all_nationwide_members}"
                 )
 
+                G.add_node(
+                    clan_id, 
+                    node_type="dynasty", 
+                    size=f_size,
+                    label=str(row['clan_surname']),
+                    title=tooltip_clan,
+                    color={"background": "rgba(231, 76, 60, 0.3)", "border": "rgba(231, 76, 60, 0.1)",
+                           "highlight": {"background": "rgba(231, 76, 60, 1)", "border": "white"},
+                           "hover": {"background": "rgba(231, 76, 60, 1)", "border": "white"}}
+                )
+
+            # 4. Build Candidate (Blue) Nodes with Electoral Years & Positions Tooltip
             for person_id, row in per_person.iterrows():
                 clan_id = row['clan_id'] if pd.notna(row['clan_id']) else None
                 is_qualifying = clan_id in qualifying_clans
 
                 if show_only_dynasties and not is_qualifying:
-                    continue  # no validated relative, or clan below threshold -- skip entirely
+                    continue
 
                 cand = row['cand_name']
                 c_wins = cand_wins[person_id]
                 c_size = 10 + (c_wins * 2.5)
 
-                G.add_node(cand, node_type="candidate", size=c_size,
-                           title=f"Candidate: {cand}\nTerms Won: {c_wins}",
-                           color={"background": "rgba(52, 152, 219, 0.3)", "border": "rgba(52, 152, 219, 0.1)",
-                                  "highlight": {"background": "rgba(52, 152, 219, 1)", "border": "white"},
-                                  "hover": {"background": "rgba(52, 152, 219, 1)", "border": "white"}})
+                tooltip_candidate = (
+                    f"CANDIDATE: {cand}\n"
+                    f"Total Terms Recorded: {c_wins}\n"
+                    f"=========================================\n"
+                    f"ELECTIONS WON & POSITIONS HELD:\n"
+                    f"{candidate_histories.get(person_id, 'No history available')}"
+                )
+
+                G.add_node(
+                    cand, 
+                    node_type="candidate", 
+                    size=c_size,
+                    title=tooltip_candidate,
+                    color={"background": "rgba(52, 152, 219, 0.3)", "border": "rgba(52, 152, 219, 0.1)",
+                           "highlight": {"background": "rgba(52, 152, 219, 1)", "border": "white"},
+                           "hover": {"background": "rgba(52, 152, 219, 1)", "border": "white"}}
+                )
 
                 if is_qualifying:
                     G.add_edge(clan_id, cand)
-                # else: stands alone -- no validated dynasty to attach to,
-                # regardless of what their surname happens to be.
 
             n_qualifying = len(qualifying_clans)
             n_total_clans = len(clan_info)
@@ -217,6 +301,7 @@ with tab_sim:
               },
               "interaction": {
                 "hover": true,
+                "tooltipDelay": 400,
                 "selectConnectedEdges": true,
                 "hoverConnectedEdges": true
               }
