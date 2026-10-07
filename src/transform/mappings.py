@@ -85,7 +85,6 @@ TOWN_MAP = {
     "SULTAN SA BARONGIS LAMBAYONG": "SULTAN SA BARONGIS",
     "TOBIAS FORNIER DAO": "TOBIAS FORNIER",
     "VALENCIA LUZURRIAGA": "VALENCIA",
-    "VALENCIA LUZURRIAGA": "VALENCIA",
     # OpenHalalan names that HF never uses, and Caloocan's three spellings (reviewed in notebook 07)
     "AMAI MANABILANG": "BUMBARAN",
     "AMAI MANABILANG BUMBARAN": "BUMBARAN",
@@ -390,6 +389,7 @@ NCR_DISTRICT_OF_TOWN = {
     "TAGUIG": "NCR FOURTH DISTRICT",
 }
 
+# Towns that existed only before 2001, so HF and OpenHalalan never list them: (province group, town)
 HISTORICAL_TOWNS = {
     ("DAVAO DEL NORTE", "BABAK"),     # merged into Island Garden City of Samal in 1998
     ("DAVAO DEL NORTE", "KAPUTIAN"),  # merged into Island Garden City of Samal in 1998
