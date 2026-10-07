@@ -1,9 +1,12 @@
 """Task 6: clean the sources and backfill missing town-level localities.
 
 Reads raw and staging inputs, standardizes names and places, fills missing
-localities in HF memberships, and writes cleaned tables to data/staging.
+localities in HF memberships, links the Ateneo dataset to HF, and writes
+cleaned tables to data/staging. Every run rebuilds all outputs from the
+inputs, so running it again gives the same files.
 """
 
+import logging
 import re
 import sys
 from pathlib import Path
@@ -15,16 +18,19 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.transform.mappings import (
-    HF_PROVINCE_MAP, ORDINAL_WORDS, PERIOD_MAP, PERIOD_TYPO_MAP, PROVINCE_TOWN_MAP,
+    ATENEO_PLACE_FIXES, ATENEO_PROVINCE_MAP, HF_PROVINCE_MAP, HISTORICAL_TOWNS, NCR_DISTRICT_OF_TOWN,
+    ORDINAL_WORDS, PERIOD_MAP, PERIOD_TYPO_MAP, PROVINCE_GROUP, PROVINCE_TOWN_MAP,
     PSA_AREA_MAP, PSA_CITY_MAP, ROSTER_CITY_MAP, ROSTER_MISSING_PROVINCE,
     ROSTER_PROVINCE_MAP, TOWN_MAP,
 )
 from src.transform.normalize import (
-    first_names_compatible, middle_names_agree, name_key, name_tokens, norm_town,
+    first_names_compatible, fix_mojibake, fix_ocr_digits, middle_names_agree, name_key,
+    name_tokens, norm_town, split_suffix,
 )
 
 RAW = PROJECT_ROOT / "data" / "raw"
 STAGING = PROJECT_ROOT / "data" / "staging"
+log = logging.getLogger("clean_backfill")
 
 TOWN_POSITIONS = ["MAYOR", "VICE MAYOR", "COUNCILOR"]
 KEYS = ["year", "position", "province_std", "last_key"]  # same-year match
@@ -36,11 +42,11 @@ JOB_WORDS = {"MAYOR", "VICEMAYOR", "COUNCILOR", "GOVERNOR", "VICEGOVERNOR", "KAG
 
 
 def apply_town_maps(towns, provinces):
-    """Standardize town names: norm_town, then TOWN_MAP, then PROVINCE_TOWN_MAP."""
+    """Standardize town names: norm_town, then TOWN_MAP, then PROVINCE_TOWN_MAP (keyed by province group)."""
     std = towns.map(norm_town, na_action="ignore").replace(TOWN_MAP)
-    for (prov, town), new in PROVINCE_TOWN_MAP.items():
-        std = std.mask(provinces.eq(prov) & std.eq(town), new)
-    return std
+    groups = provinces.replace(PROVINCE_GROUP)
+    fixed = pd.Series([PROVINCE_TOWN_MAP.get(pair) for pair in zip(groups, std)], index=std.index)
+    return std.mask(fixed.notna(), fixed)
 
 
 def standardize_memberships(memberships):
@@ -419,14 +425,151 @@ def resolve_persons(persons, memberships, winners_clean):
     merged["last_key"] = merged["last_name"].map(name_key)
     return merged.reset_index(), id_map
 
+def known_town_pairs(memberships_clean, winners_clean):
+    """(province_group, town) pairs of real towns: in HF or OpenHalalan town-level rows, or historical."""
+    hf = memberships_clean[memberships_clean["position"].isin(TOWN_POSITIONS) & memberships_clean["locality_source"].eq("original")]
+    oh = winners_clean[winners_clean["position"].isin(TOWN_POSITIONS) & ~winners_clean["town_shift_suspect"] & winners_clean["town_std"].notna()]
+    pairs = set(zip(hf["province_std"].replace(PROVINCE_GROUP), hf["locality_std"]))
+    pairs |= set(zip(oh["province_std"].replace(PROVINCE_GROUP), oh["town_std"]))
+    return pairs | HISTORICAL_TOWNS
+
+
+def clean_ateneo_politicians(ateneo, known_towns):
+    """Ateneo politicians with repaired text, standard provinces and towns, split names, and flags."""
+    df = ateneo.copy()
+    df.columns = [c.lower() for c in df.columns]
+    df.insert(0, "ateneo_row_id", [f"AT-{i:06d}" for i in range(len(df))])
+    for col in ["first_name", "last_name", "party", "municipality"]:
+        df[col] = df[col].map(fix_mojibake)
+
+    # Towns: only town-level positions have one ("---" and other text without letters counts as missing)
+    is_town = df["position"].isin(TOWN_POSITIONS)
+    muni = df["municipality"].where(is_town & df["municipality"].str.contains("[A-Z]", case=False, na=False))
+    df["province_std"] = df["province"].replace(ATENEO_PROVINCE_MAP)
+    town = apply_town_maps(muni, df["province_std"])
+    town = town.mask(df["province_std"].eq("NCR FIRST DISTRICT") & town.notna(), "MANILA")
+
+    # Places: the NCR district follows the city, then fixes for rows filed under the wrong place in one election
+    district = town.map(NCR_DISTRICT_OF_TOWN).where(df["province_std"].str.startswith("NCR"))
+    df["province_std"] = district.fillna(df["province_std"])
+    hits = [(df["year"].eq(y) & df["province_std"].eq(p) & town.eq(t), right) for (y, p, t), right in ATENEO_PLACE_FIXES.items()]
+    for hit, (right_province, right_town) in hits:  # all rows are found first, so swapped labels don't undo each other
+        df.loc[hit, "province_std"] = right_province
+        town = town.mask(hit, right_town)
+    df["province_group"] = df["province_std"].replace(PROVINCE_GROUP)
+
+    df["town_std"] = town
+    pairs = zip(df["province_group"], town)
+    df["town_verified"] = pd.Series([pair in known_towns for pair in pairs], index=df.index).where(town.notna())
+    df["town_source"] = "not_applicable"
+    df.loc[is_town & town.notna(), "town_source"] = "original"
+    df.loc[is_town & town.isna(), "town_source"] = "unfilled"
+
+    # Names: suffixes, scanning errors, match keys
+    first = df["first_name"].str.upper().str.replace(r"\s+", " ", regex=True).str.strip().map(fix_ocr_digits)
+    last = df["last_name"].str.upper().str.replace(r"\s+", " ", regex=True).str.strip().map(fix_ocr_digits)
+    first_split = [split_suffix(f, glued_ok=(y == 2019)) for f, y in zip(first, df["year"])]
+    last_split = [split_suffix(n) for n in last]
+    df["first_name_std"] = [f for f, _ in first_split]
+    df["last_name_std"] = [n for n, _ in last_split]
+    suffix = pd.Series([s for _, s in first_split], index=df.index)
+    df["name_suffix"] = suffix.fillna(pd.Series([s for _, s in last_split], index=df.index))
+    odd = r"[0-9;!?_|]"
+    df["name_suspect"] = df["first_name"].str.contains(odd, na=False) | df["last_name"].str.contains(odd, na=False)
+    df["first_key"] = df["first_name_std"].map(name_key, na_action="ignore")
+    df["last_key"] = df["last_name_std"].map(name_key)
+
+    # Flags
+    key = ["year", "position", "province", "municipality", "first_name", "last_name"]
+    df["is_duplicate"] = df.duplicated(key)
+    df["is_fat_dynasty"] = df["fat_dynasty_indicator"].eq("fat")
+    return df
+
+def split_doubled_towns(ateneo_clean, winners_std):
+    """Fix Ateneo town-years that hold two towns' officials.
+
+    In 2001, Ateneo put the officials of a town named like its province (e.g. QUEZON, Quezon) under
+    the town listed before it, so that town shows twice the usual officials. In town-years with more
+    officials than MAX_TOWN_OFFICIALS, each official takes the town OpenHalalan records for them in the
+    same election (the HF backfill matcher). winners_std is OpenHalalan from standardize_winners.
+    """
+    df = ateneo_clean.copy()
+    has_town = df["town_source"].eq("original")
+    size = df[has_town].groupby(["year", "province_std", "town_std"])["ateneo_row_id"].transform("size")
+    rows = df.loc[size[size > MAX_TOWN_OFFICIALS].index, ["ateneo_row_id", *KEYS, "first_key", "first_name_std"]]
+    rows = rows.rename(columns={"ateneo_row_id": "id", "first_name_std": "first_name"})
+    found = match_towns(rows, prep_oh(winners_std, RELIABLE_YEARS))
+    town = df["ateneo_row_id"].map(found["town"])
+    fix = town.notna() & town.ne(df["town_std"])
+    df.loc[fix, "town_std"] = town[fix]
+    df.loc[fix, "town_source"] = "openhalalan_" + df.loc[fix, "ateneo_row_id"].map(found["tier"])
+    return df
+
+
+def link_ateneo_to_hf(ateneo_clean, memberships_clean, persons):
+    """Link Ateneo rows to the HF rows that were copied from them (2004-2016).
+
+    Adds hf_membership_id and person_id. Where a linked town-level row has no town in Ateneo,
+    copies HF's backfilled town and its source. persons is the output of clean_persons.
+    """
+    def letters(s):
+        return s.fillna("").str.upper().str.replace("Ñ", "N").str.replace(r"[^A-Z]", "", regex=True)
+
+    hf = memberships_clean.merge(persons, left_on="person_id_raw", right_on="id", suffixes=("", "_person"))
+    hf_keys = pd.DataFrame({
+        "year": hf["year"], "position": hf["position"], "province": hf["province_std"],
+        "place": hf["locality"].str.upper().fillna(""),
+        "name": letters(hf["first_name"] + " " + hf["name_suffix"].fillna("")) + "|" + letters(hf["last_name"]),
+        "hf_membership_id": hf["id"], "person_id": hf["person_id"],
+        "hf_town": hf["locality_std"], "hf_town_source": hf["locality_source"],
+    })
+    df = ateneo_clean.copy()
+    at_keys = pd.DataFrame({
+        "year": df["year"], "position": df["position"], "province": df["province"].replace(ATENEO_PROVINCE_MAP),
+        "place": df["municipality"].str.upper().fillna(""),
+        "name": letters(df["first_name_std"] + " " + df["name_suffix"].fillna("")) + "|" + letters(df["last_name_std"]),
+    })
+    key = ["year", "position", "province", "place", "name"]
+    hf_keys["n"] = hf_keys.groupby(key).cumcount()  # numbers repeated keys, so copies pair up one to one
+    at_keys["n"] = at_keys.groupby(key).cumcount()
+    linked = at_keys.merge(hf_keys, on=key + ["n"], how="left")
+    linked.index = df.index
+
+    df["hf_membership_id"] = linked["hf_membership_id"]
+    df["person_id"] = linked["person_id"]
+    fill = df["town_source"].eq("unfilled") & linked["hf_town"].notna()
+    df.loc[fill, "town_std"] = linked.loc[fill, "hf_town"]
+    df.loc[fill, "town_source"] = linked.loc[fill, "hf_town_source"]
+    df.loc[fill, "town_verified"] = True  # HF fills towns only with towns it or OpenHalalan record
+    return df
+
+
+def clean_ateneo_provinces(provinces):
+    """Ateneo province sheet in long format: one row per province and election year (blank = province not created yet)."""
+    df = provinces.melt(id_vars="province", var_name="year", value_name="fat_dynasty_share_pct")
+    df["year"] = df["year"].str[-4:].astype(int)
+    df["province_std"] = df["province"].replace(ATENEO_PROVINCE_MAP)
+    df["province_group"] = df["province_std"].replace(PROVINCE_GROUP)
+    return df[["province", "province_std", "province_group", "year", "fat_dynasty_share_pct"]]
+
+
+def read_input(path):
+    """Read a parquet or CSV input, and stop with a clear message if it is missing."""
+    if not path.exists():
+        raise FileNotFoundError(f"{path} not found. Run the earlier pipeline steps first (ingestion and PDF parsing).")
+    log.info("reading %s", path.name)
+    return pd.read_parquet(path) if path.suffix == ".parquet" else pd.read_csv(path)
+
 
 def main(out_dir=STAGING):
-    """Read all inputs, clean them, backfill localities, merge split person IDs, and write the cleaned tables."""
-    persons_raw = pd.read_parquet(RAW / "hf_persons.parquet")
-    memberships_raw = pd.read_parquet(RAW / "hf_memberships.parquet")
-    winners_raw = pd.read_csv(RAW / "openhalalan_winners.csv")
-    poverty_raw = pd.read_csv(STAGING / "psa_poverty.csv")
-    roster_raw = pd.read_csv(STAGING / "roster_legislators.csv")
+    """Read all inputs, clean them, backfill localities, merge split person IDs, link Ateneo, and write the cleaned tables."""
+    persons_raw = read_input(RAW / "hf_persons.parquet")
+    memberships_raw = read_input(RAW / "hf_memberships.parquet")
+    winners_raw = read_input(RAW / "openhalalan_winners.csv")
+    ateneo_raw = read_input(RAW / "ateneo_politicians_raw.parquet")
+    ateneo_provinces_raw = read_input(RAW / "ateneo_provinces_raw.parquet")
+    poverty_raw = read_input(STAGING / "psa_poverty.csv")
+    roster_raw = read_input(STAGING / "roster_legislators.csv")
 
     winners_std = standardize_winners(winners_raw)
     winners_clean = clean_winners(winners_std)
@@ -438,25 +581,44 @@ def main(out_dir=STAGING):
     memberships["person_id_raw"] = memberships["person_id"]
     memberships["person_id"] = memberships["person_id_raw"].map(id_map.set_index("person_id_raw")["person_uid"])
 
+    # Ateneo: clean, check towns against HF and OpenHalalan, then link to HF
+    ateneo = clean_ateneo_politicians(ateneo_raw, known_town_pairs(memberships, winners_clean))
+    ateneo = split_doubled_towns(ateneo, winners_std)
+    ateneo = link_ateneo_to_hf(ateneo, memberships, persons)
+
+    poverty = clean_psa(poverty_raw)
+    roster = clean_roster(roster_raw, winners_std)
+    for table in [memberships, winners_clean, poverty, roster]:
+        table["province_group"] = table["province_std"].replace(PROVINCE_GROUP)
+
     outputs = {
         "hf_persons_clean": persons_merged,
         "hf_person_id_map": id_map,
         "hf_memberships_clean": memberships,
         "openhalalan_winners_clean": winners_clean,
-        "psa_poverty_clean": clean_psa(poverty_raw),
-        "roster_legislators_clean": clean_roster(roster_raw, winners_std),
+        "psa_poverty_clean": poverty,
+        "roster_legislators_clean": roster,
+        "ateneo_politicians_clean": ateneo,
+        "ateneo_province_shares_clean": clean_ateneo_provinces(ateneo_provinces_raw),
     }
 
     out_dir.mkdir(parents=True, exist_ok=True)
     for name, df in outputs.items():
         path = out_dir / f"{name}.parquet"
-        df.to_parquet(path, index=False)
-        print(f"{name}: {len(df):,} rows -> {path}")
+        temp = path.with_suffix(".tmp")
+        df.to_parquet(temp, index=False)
+        temp.replace(path)  # swap in the finished file, so a failed run never leaves a half-written output
+        log.info("%s: %s rows -> %s", name, f"{len(df):,}", path)
 
-    print(f"\npeople: {len(persons):,} HF IDs -> {len(persons_merged):,} after merging split IDs")
-    print("\nlocality_source:")
-    print(memberships["locality_source"].value_counts().to_string())
-    
+    log.info("people: %s HF IDs -> %s after merging split IDs", f"{len(persons):,}", f"{len(persons_merged):,}")
+    log.info("HF locality_source: %s", memberships["locality_source"].value_counts().to_dict())
+    log.info("Ateneo rows linked to HF: %s", f"{ateneo['hf_membership_id'].notna().sum():,}")
+    log.info("Ateneo town_source: %s", ateneo["town_source"].value_counts().to_dict())
+    unverified = ateneo["town_verified"].eq(False).sum()
+    if unverified:
+        log.warning("Ateneo towns not found in any other source: %s rows (see notebook 07)", unverified)
+
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     main(Path(sys.argv[1]) if len(sys.argv) > 1 else STAGING)

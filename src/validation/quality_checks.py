@@ -22,6 +22,8 @@ class DataQualityChecker:
         self.winners = pd.read_parquet(self.staging_dir / "openhalalan_winners_clean.parquet")
         self.roster = pd.read_parquet(self.staging_dir / "roster_legislators_clean.parquet")
         self.psa = pd.read_parquet(self.staging_dir / "psa_poverty_clean.parquet")
+        self.ateneo = pd.read_parquet(self.staging_dir / "ateneo_politicians_clean.parquet")
+        self.ateneo_shares = pd.read_parquet(self.staging_dir / "ateneo_province_shares_clean.parquet")
 
     def _record(self, check_name: str, passed: bool, details: str):
         status = "PASSED" if passed else "FAILED"
@@ -138,6 +140,59 @@ class DataQualityChecker:
 
         self._record("DQ-6: Poverty Metric Statistical Range", passed, details)
 
+    def check_ateneo_keys_and_links(self):
+        """DQ-7: Ateneo row ids are unique, and every HF link points to an existing HF row of the same person."""
+        bad_ids = self.ateneo["ateneo_row_id"].isna().sum() + self.ateneo["ateneo_row_id"].duplicated().sum()
+        links = self.ateneo.dropna(subset=["hf_membership_id"])
+        hf_person = self.memberships.set_index("id")["person_id"]
+        reused = links["hf_membership_id"].duplicated().sum()
+        missing = (~links["hf_membership_id"].isin(hf_person.index)).sum()
+        other_person = (links["person_id"] != links["hf_membership_id"].map(hf_person)).sum()
+        link_rate = self.ateneo.loc[self.ateneo["year"].between(2004, 2016), "hf_membership_id"].notna().mean()
+
+        passed = (bad_ids == 0) and (reused == 0) and (missing == 0) and (other_person == 0) and (link_rate >= 0.99)
+        details = (
+            f"Missing or duplicate row ids: {bad_ids} | HF rows linked twice: {reused} | "
+            f"Links to missing HF rows: {missing} | Person differs from HF: {other_person} | "
+            f"2004-2016 rows linked: {link_rate:.2%}"
+        )
+        self._record("DQ-7: Ateneo Keys and HF Links", passed, details)
+
+    def check_ateneo_towns(self):
+        """DQ-8: Ateneo town sources are valid, and a row has a town exactly when its source found one."""
+        found_sources = {"original", "history", "openhalalan_t1", "openhalalan_t2", "openhalalan_xyear"}
+        valid_sources = found_sources | {"unfilled", "not_applicable"}
+        invalid_sources = set(self.ateneo["town_source"].dropna()) - valid_sources
+        town_found = self.ateneo["town_source"].isin(found_sources)
+        mismatched = (town_found != self.ateneo["town_std"].notna()).sum()
+        bad_years = (~self.ateneo["year"].between(1987, 2022)).sum()
+        unconfirmed = self.ateneo["town_verified"].eq(False).sum()
+
+        passed = (len(invalid_sources) == 0) and (mismatched == 0) and (bad_years == 0)
+        details = (
+            f"Invalid town sources: {sorted(invalid_sources) if invalid_sources else 'None'} | "
+            f"Town present or missing against its source: {mismatched} | Out-of-range years: {bad_years} | "
+            f"Towns no other source confirms (reviewed in notebook 07): {unconfirmed}"
+        )
+        self._record("DQ-8: Ateneo Town Sources and Completeness", passed, details)
+
+    def check_ateneo_province_shares(self):
+        """DQ-9: Ateneo's province shares are percentages and match a recount from the politicians table."""
+        shares = self.ateneo_shares.dropna(subset=["fat_dynasty_share_pct"])
+        out_of_range = (~shares["fat_dynasty_share_pct"].between(0, 100)).sum()
+        duplicates = self.ateneo_shares.duplicated(["province", "year"]).sum()
+        recount = self.ateneo.groupby(["province", "year"])["is_fat_dynasty"].mean().mul(100)
+        sheet = shares.set_index(["province", "year"])["fat_dynasty_share_pct"]
+        gap = (recount.reindex(sheet.index) - sheet).abs()
+        not_recounted = gap.isna().sum()
+
+        passed = (out_of_range == 0) and (duplicates == 0) and (not_recounted == 0) and (gap.max() < 0.001)
+        details = (
+            f"Shares outside 0-100: {out_of_range} | Duplicate province-years: {duplicates} | "
+            f"Province-years not recounted: {not_recounted} | Largest gap vs recount: {gap.max():.6f}"
+        )
+        self._record("DQ-9: Ateneo Province Shares vs Recount", passed, details)
+
     def run_all(self) -> bool:
         print("\n" + "=" * 60)
         print("RUNNING AUTOMATED DATA QUALITY CHECKS")
@@ -148,6 +203,9 @@ class DataQualityChecker:
         self.check_temporal_bounds()
         self.check_locality_backfill_integrity()
         self.check_poverty_metric_ranges()
+        self.check_ateneo_keys_and_links()
+        self.check_ateneo_towns()
+        self.check_ateneo_province_shares()
         print("=" * 60)
 
         all_passed = all(status == "PASSED" for _, status, _ in self.results)

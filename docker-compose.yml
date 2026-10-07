@@ -8,7 +8,7 @@ x-airflow-common: &airflow-common
     - AIRFLOW__CORE__EXECUTOR=LocalExecutor
     - AIRFLOW__CORE__LOAD_EXAMPLES=False
     - PYTHONPATH=/opt/airflow
-    - _PIP_ADDITIONAL_REQUIREMENTS: "nbconvert ipykernel networkx scipy"
+    - _PIP_ADDITIONAL_REQUIREMENTS=nbconvert ipykernel networkx scipy
   volumes:
     - ./dags:/opt/airflow/dags
     - ./src:/opt/airflow/src
