@@ -16,7 +16,8 @@ The system maps familial ties (including multi-hop kinship such as siblings, 1st
 
 | Env Variable | Source Name | Format / Type | Role in Pipeline & Methodological Justification |
 | :--- | :--- | :--- | :--- |
-| `PRIMARY_HF_DATASET` | **BetterGov.PH Raw Philippine Data** (`persons` & `memberships`)[cite: 1] | Parquet (Hugging Face API)[cite: 1] | **Main Data Source:** Contains pre-linked `person_id` records across election cycles (2004–2016)[cite: 1], solving longitudinal entity resolution across terms. |
+| `PRIMARY_HF_DATASET` | **BetterGov.PH Raw Philippine Data** (`persons` & `memberships`) | Parquet (Hugging Face API) | **Main Entity Resolution Core:** Contains pre-linked `person_id` records across election cycles (2004–2016), resolving longitudinal identity across terms. |
+| `ATENEO_DYNASTY_DATASET_URL` | **Ateneo Policy Center (ASoG) Political Dynasties Dataset (2022 Update)** | Excel (`.xlsx`) | **Longitudinal Scale & Dynasty Ground Truth:** Ingests 207,000+ elected official records across 11 election cycles (1987–2022), providing continuous sub-national coverage (Mayors, Councilors, Governors, Representatives) and academic fat-dynasty benchmark classifications. |
 | `SECONDARY_SOURCE_URL` | **OpenHalalan Dataset (2001–2025)** | CSV | **Longitudinal Extension & Prior Art:** Extends local/national winners across 25 years and provides pre-computed per-town dynastic share metrics to benchmark our graph calculations. |
 | `TERTIARY_SOURCE_URL` | **PSA OpenSTAT Poverty Incidence** (`0011E3DF010.px`) | JSON (PXWeb REST API) | **Socioeconomic Covariate:** Enables exploratory correlation between provincial dynasty stronghold rates and poverty incidence beyond pure network topology. |
 | `HISTORICAL_ROSTER_URL` | **House of Representatives Roster of Legislators (1907–2019)** | PDF (Direct S3 Bucket) | **50+ Year Historical Depth:** Reaches prior to Martial Law, enabling tracking of national legislative dynasties across regime changes. |

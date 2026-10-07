@@ -56,6 +56,74 @@ def ingest_huggingface():
         print(f"    {len(ds):,} rows saved")
 
 
+def ingest_ateneo_dataset():
+    """
+    Ingests the Ateneo Policy Center 1987-2022 Political Dynasties Dataset.
+    Checks RAW_DIR for matching Excel files, verifies both critical sheets,
+    and stages clean raw Parquet files for downstream transforms.
+    """
+    print("Ingesting Ateneo Policy Center Dynasty Dataset...")
+    
+    # Locate file by common variants in RAW_DIR
+    target_names = [
+        "Ateneo_Policy_Center_Philippine_Political_Dynasties_Dataset__2022_Update_ (2).xlsx",
+        "Ateneo_Policy_Center_Philippine_Political_Dynasties_Dataset__2022_Update_.xlsx",
+        "ateneo_political_dynasties_2022.xlsx"
+    ]
+    
+    excel_path = None
+    for name in target_names:
+        candidate = RAW_DIR / name
+        if candidate.exists() and candidate.stat().st_size > 50_000:
+            excel_path = candidate
+            break
+            
+    if not excel_path:
+        # Check wildcard if filename was renamed slightly
+        matches = list(RAW_DIR.glob("*Ateneo*.xlsx"))
+        if matches:
+            excel_path = matches[0]
+
+    if not excel_path:
+        if ALLOW_FALLBACK:
+            print("Ateneo dataset not found. Generating FALLBACK stub...")
+            pd.DataFrame({
+                "first_name": ["JUAN"], "last_name": ["DELA CRUZ"], "party": ["IND"],
+                "region": ["NCR"], "province": ["NCR SECOND DISTRICT"], "municipality": ["PASIG"],
+                "position": ["MAYOR"], "year": [2016], "PSGC_Province": ["PH133900000"],
+                "fat_dynasty_indicator": ["non-fat"]
+            }).to_parquet(RAW_DIR / "ateneo_politicians_raw.parquet", index=False)
+            return
+        raise RuntimeError(
+            f"Ateneo Excel dataset not found in {RAW_DIR}. Please place "
+            f"'Ateneo_Policy_Center_Philippine_Political_Dynasties_Dataset__2022_Update_ (2).xlsx' in {RAW_DIR}"
+        )
+
+    print(f" -> Found dataset at {excel_path.name} ({excel_path.stat().st_size / (1024 * 1024):.1f} MB)")
+    
+    xls = pd.ExcelFile(excel_path)
+    
+    # 1. Sheet: Data - Politicians (207,000+ records)
+    if "Data - Politicians" in xls.sheet_names:
+        print(" -> Extracting 'Data - Politicians' sheet...")
+        df_pol = pd.read_excel(xls, sheet_name="Data - Politicians")
+        if len(df_pol) < 1000:
+            raise RuntimeError(f"Politicians sheet contains only {len(df_pol)} rows; expected ~207,000")
+        out_pol = RAW_DIR / "ateneo_politicians_raw.parquet"
+        df_pol.to_parquet(out_pol, index=False)
+        print(f"    Saved {len(df_pol):,} politician records to {out_pol.name}")
+    else:
+        raise RuntimeError("Missing required sheet 'Data - Politicians' in Ateneo file")
+
+    # 2. Sheet: Data - Province (Provincial benchmark shares 1992-2022)
+    if "Data - Province" in xls.sheet_names:
+        print(" -> Extracting 'Data - Province' sheet...")
+        df_prov = pd.read_excel(xls, sheet_name="Data - Province")
+        out_prov = RAW_DIR / "ateneo_provinces_raw.parquet"
+        df_prov.to_parquet(out_prov, index=False)
+        print(f"    Saved {len(df_prov):,} provincial benchmark rows to {out_prov.name}")
+
+
 def ingest_openhalalan():
     """Downloads OpenHalalan release files (winners 2001-2025; optional vote counts)."""
     print("Ingesting OpenHalalan...")
@@ -188,6 +256,7 @@ if __name__ == "__main__":
 
     steps = [
         ("huggingface", ingest_huggingface),
+        ("ateneo_dynasties", ingest_ateneo_dataset),
         ("openhalalan", ingest_openhalalan),
         ("psa_poverty", ingest_psa_poverty),
         ("historical_roster", ingest_historical_roster),

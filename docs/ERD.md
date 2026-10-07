@@ -3,6 +3,8 @@
 ```mermaid
 erDiagram
     dim_person ||--o{ fact_electoral_membership : "holds"
+    dim_person ||--o{ fact_person_clan : "belongs_to"
+    dim_clan ||--o{ fact_person_clan : "encompasses"
     dim_geography ||--o{ fact_electoral_membership : "occurs_in"
     dim_geography ||--o{ fact_election_winner : "recorded_at"
     dim_geography ||--o{ fact_legislative_tenure : "represents"
@@ -18,11 +20,23 @@ erDiagram
         boolean suffix_suspect
     }
 
+    dim_clan {
+        string clan_id PK
+        string clan_surname
+        int n_members
+    }
+
+    fact_person_clan {
+        string person_id FK
+        string clan_id FK
+    }
+
     dim_geography {
         int location_id PK
         string province_std
         string town_std
         string region
+        string psgc_code
         boolean is_city
     }
 
@@ -32,7 +46,9 @@ erDiagram
         int location_id FK
         int year
         string position
+        string party
         string locality_source
+        string source
     }
 
     fact_election_winner {
