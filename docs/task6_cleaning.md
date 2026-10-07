@@ -28,7 +28,7 @@ docker compose run --rm --no-deps --entrypoint python airflow-scheduler /opt/air
 
 In Airflow, the DAG task `run_clean_backfill` runs this script before the kinship, stronghold, and network notebooks.
 
-After re-running this step, re-run the later steps that read its outputs (kinship, stronghold, network notebooks, and the database loader). All 6 checks in `src/validation/quality_checks.py` pass on these outputs.
+After re-running this step, re-run the later steps that read its outputs (kinship, stronghold, network notebooks, and the database loader). All 9 checks in `src/validation/quality_checks.py` pass on these outputs (see "Data quality checks" below).
 
 ### Logging
 
@@ -45,7 +45,7 @@ $after = Get-FileHash data\staging\*.parquet
 if (Compare-Object $before $after -Property Hash, Path) { "some outputs changed" } else { "all outputs identical after a rerun" }
 ```
 
-Result: `all outputs identical after a rerun`. The outputs also have the same values with pandas 2.2 and pandas 3.0. Inside Docker (Python 3.11.9, pandas 3.0.6), the script logs the same counts and all 6 checks pass.
+Result: `all outputs identical after a rerun`. The outputs also have the same values with pandas 2.2 and pandas 3.0. Inside Docker (Python 3.11.9, pandas 3.0.6), the script logs the same counts and all 9 checks pass.
 
 ### Tests
 
@@ -55,6 +55,16 @@ python -m pytest tests
 ```
 
 8 unit tests cover the text repair, the scanning-error fix, suffix splitting, town and name standardization, province-group town fixes, and the province sheet reshape.
+
+### Data quality checks
+
+`src/validation/quality_checks.py` runs in the DAG before the database load, and a failed check stops the pipeline there. DQ-1 to DQ-6 cover the HF, roster, and PSA tables. DQ-7 to DQ-9 cover the two Ateneo tables:
+
+| Check | What it tests |
+|---|---|
+| DQ-7: Ateneo Keys and HF Links | Row ids are unique. Every HF link points to an existing HF row, no HF row is linked twice, and the linked row has HF's person ID. At least 99% of the 2004–2016 rows must be linked (currently 99.99%). |
+| DQ-8: Ateneo Town Sources and Completeness | `town_source` has only known values, a row has a town exactly when its source found one, and every year is between 1987 and 2022. It also reports the 20 unconfirmed towns, without failing. |
+| DQ-9: Ateneo Province Shares vs Recount | Shares are between 0 and 100, there is one row per province and year, and every share matches a recount from `ateneo_politicians_clean` (largest gap 0.000002). |
 
 ## Outputs
 
