@@ -204,6 +204,90 @@ class PostgresLoader:
                 conn.execute(query, row)
         print(f"fact_poverty_metric loaded ({len(records)} rows).")
 
+    def load_kinship_clans(self, chunksize: int = 5000):
+        """Load validated paternal-family (clan) membership from the kinship engine.
+
+        politicians.parquet and clans.parquet (from 03_kinship_engine.ipynb)
+        cover the full HF + OpenHalalan + Roster universe, keyed by
+        person_uid. dim_person currently only holds the HF-sourced subset
+        (loaded from hf_persons_clean.parquet in load_dim_person), so this
+        filters to person_uid values prefixed "HF-" and strips that prefix
+        to recover the matching dim_person.person_id.
+
+        OpenHalalan-only / Roster-only clan members are skipped here --
+        they have no row in dim_person yet, since the loader doesn't load
+        fact_election_winner / fact_legislative_tenure. That's a separate,
+        larger piece of work if full 2001-2025 / historical coverage is
+        wanted in the dashboard later.
+        """
+        print("Loading dim_clan & fact_person_clan...")
+        people = pd.read_parquet(self.staging_dir / "politicians.parquet")
+        clans = pd.read_parquet(self.staging_dir / "clans.parquet")
+
+        import numpy as np
+
+        # --- dim_clan ---
+        clan_cols = ["clan_id", "clan_surname", "main_place", "n_members", "first_year", "last_year", "n_allied_clans"]
+        for col in clan_cols:
+            if col not in clans.columns:
+                clans[col] = None
+        clan_df = clans[clan_cols].copy()
+        clan_df = clan_df.replace({np.nan: None, pd.NA: None})
+        clan_df = clan_df.where(clan_df.notnull(), None)
+        clan_records = clan_df.to_dict(orient="records")
+
+        with self.engine.begin() as conn:
+            for row in clan_records:
+                query = text("""
+                    INSERT INTO dim_clan (
+                        clan_id, clan_surname, main_place, n_members, first_year, last_year, n_allied_clans
+                    ) VALUES (
+                        :clan_id, :clan_surname, :main_place, :n_members, :first_year, :last_year, :n_allied_clans
+                    )
+                    ON CONFLICT (clan_id) DO UPDATE SET
+                        clan_surname = EXCLUDED.clan_surname,
+                        main_place = EXCLUDED.main_place,
+                        n_members = EXCLUDED.n_members,
+                        first_year = EXCLUDED.first_year,
+                        last_year = EXCLUDED.last_year,
+                        n_allied_clans = EXCLUDED.n_allied_clans;
+                """)
+                conn.execute(query, row)
+        print(f"dim_clan loaded ({len(clan_records)} rows).")
+
+        # --- fact_person_clan (HF-origin subset only, matching dim_person) ---
+        hf_people = people[people["person_uid"].str.startswith("HF-", na=False)].copy()
+        hf_people["person_id"] = hf_people["person_uid"].str[3:]  # strip "HF-" prefix
+
+        pc_cols = ["person_id", "clan_id", "n_relatives", "has_relative_in_office"]
+        for col in pc_cols:
+            if col not in hf_people.columns:
+                hf_people[col] = None
+        pc_df = hf_people[pc_cols].copy()
+        pc_df["n_relatives"] = pc_df["n_relatives"].apply(lambda x: int(x) if pd.notnull(x) else 0)
+        pc_df = pc_df.replace({np.nan: None, pd.NA: None})
+        pc_df = pc_df.where(pc_df.notnull(), None)
+        records = pc_df.to_dict(orient="records")
+
+        with self.engine.begin() as conn:
+            for i in range(0, len(records), chunksize):
+                batch = records[i:i + chunksize]
+                query = text("""
+                    INSERT INTO fact_person_clan (
+                        person_id, clan_id, n_relatives, has_relative_in_office
+                    ) VALUES (
+                        :person_id, :clan_id, :n_relatives, :has_relative_in_office
+                    )
+                    ON CONFLICT (person_id) DO UPDATE SET
+                        clan_id = EXCLUDED.clan_id,
+                        n_relatives = EXCLUDED.n_relatives,
+                        has_relative_in_office = EXCLUDED.has_relative_in_office;
+                """)
+                conn.execute(query, batch)
+        skipped = len(people) - len(records)
+        print(f"fact_person_clan loaded ({len(records)} of {len(people)} total politicians — "
+              f"{skipped} OpenHalalan/Roster-only people skipped, not yet in dim_person).")
+
     def run_all(self):
         print("STARTING POSTGRESQL IDEMPOTENT ETL LOAD")
         self.init_schema()
@@ -211,6 +295,7 @@ class PostgresLoader:
         self.load_dim_person()
         self.load_fact_memberships(geo_map)
         self.load_fact_poverty(geo_map)
+        self.load_kinship_clans()
         print("ALL TABLES LOADED SUCCESSFULLY.")
 
 

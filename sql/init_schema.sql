@@ -35,6 +35,22 @@ CREATE TABLE IF NOT EXISTS dim_position (
     term_length_years INT DEFAULT 3
 );
 
+-- ----------------------------------------------------------------------------
+-- dim_clan: validated paternal-family groupings from 03_kinship_engine.ipynb
+-- (clans.parquet). A clan only exists if 2+ people are linked by an actual
+-- nuclear_family / father_son / paternal_kin edge -- NOT by surname text
+-- matching. This is what tab_sim in the dashboard should group on.
+-- ----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS dim_clan (
+    clan_id VARCHAR(20) PRIMARY KEY,
+    clan_surname VARCHAR(150),
+    main_place VARCHAR(150),
+    n_members INT NOT NULL,
+    first_year INT,
+    last_year INT,
+    n_allied_clans INT DEFAULT 0
+);
+
 -- ============================================================================
 -- 2. FACT TABLES
 -- ============================================================================
@@ -94,6 +110,23 @@ CREATE TABLE IF NOT EXISTS fact_poverty_metric (
     CONSTRAINT uq_poverty_loc_year UNIQUE (location_id, year, area_key)
 );
 
+-- ----------------------------------------------------------------------------
+-- fact_person_clan: one row per HF-sourced politician who belongs to a
+-- validated clan, from politicians.parquet (person_uid -> clan_id,
+-- n_relatives). politicians.parquet spans HF + OpenHalalan + Roster
+-- (person_uid), but dim_person currently only holds the HF-sourced subset,
+-- so this table is loaded filtered to person_uid values prefixed "HF-",
+-- with that prefix stripped to recover the matching dim_person.person_id.
+-- A person with no row here, or with clan_id NULL, has no validated
+-- relative in the dataset -- NOT a dynasty, regardless of their surname.
+-- ----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS fact_person_clan (
+    person_id VARCHAR(100) PRIMARY KEY REFERENCES dim_person(person_id) ON DELETE CASCADE,
+    clan_id VARCHAR(20) REFERENCES dim_clan(clan_id) ON DELETE SET NULL,
+    n_relatives INT DEFAULT 0,
+    has_relative_in_office BOOLEAN DEFAULT FALSE
+);
+
 -- ============================================================================
 -- 3. PERFORMANCE INDEXES
 -- ============================================================================
@@ -103,3 +136,4 @@ CREATE INDEX IF NOT EXISTS idx_mem_location ON fact_electoral_membership(locatio
 CREATE INDEX IF NOT EXISTS idx_person_name ON dim_person(last_name, first_name);
 CREATE INDEX IF NOT EXISTS idx_geo_province ON dim_geography(province_std);
 CREATE INDEX IF NOT EXISTS idx_poverty_lookup ON fact_poverty_metric(year, location_id);
+CREATE INDEX IF NOT EXISTS idx_person_clan_clan ON fact_person_clan(clan_id);

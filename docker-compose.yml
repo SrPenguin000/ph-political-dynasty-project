@@ -8,12 +8,14 @@ x-airflow-common: &airflow-common
     - AIRFLOW__CORE__EXECUTOR=LocalExecutor
     - AIRFLOW__CORE__LOAD_EXAMPLES=False
     - PYTHONPATH=/opt/airflow
+    - _PIP_ADDITIONAL_REQUIREMENTS: "nbconvert ipykernel networkx scipy"
   volumes:
     - ./dags:/opt/airflow/dags
     - ./src:/opt/airflow/src
     - ./sql:/opt/airflow/sql
     - ./data:/opt/airflow/data
     - ./logs:/opt/airflow/logs
+    - ./notebooks:/opt/airflow/notebooks
   depends_on:
     postgres:
       condition: service_healthy

@@ -59,16 +59,37 @@ with tab_sim:
         disruption_pct = st.slider("Disruption Intensity (% Nodes Removed)", 0, 80, 20, step=5)
         k_core = st.slider("Core Entrenchment Filter (k-core)", 0, 5, 0, help="Filter out periphery single-term candidates")
 
+        st.markdown("### Dynasty Classification")
+        dynasty_threshold = st.slider(
+            "Min. Clan Size to Display as Dynasty", 2, 10, 2,
+            help="Clan size comes from validated kinship links (same paternal "
+                 "line, from the kinship engine) -- not surname text matching. "
+                 "Every clan already has 2+ members by construction; raise this "
+                 "to require larger, more entrenched clusters."
+        )
+        show_only_dynasties = st.checkbox("Show only qualifying dynasty clusters", value=False)
+        st.caption(
+            "Note: clan data currently only covers politicians sourced from the "
+            "HF dataset (2004-2016). People only found in OpenHalalan or the "
+            "historical Roster have no clan lookup yet."
+        )
+
     with col_graph:
         base_query = f"""
         SELECT 
+            p.person_id,
             p.last_name, 
             p.first_name, 
             f.position, 
-            f.year
+            f.year,
+            pc.clan_id,
+            c.clan_surname,
+            c.n_members AS clan_size
         FROM fact_electoral_membership f
         JOIN dim_person p ON f.person_id = p.person_id
         JOIN dim_geography g ON f.location_id = g.location_id
+        LEFT JOIN fact_person_clan pc ON p.person_id = pc.person_id
+        LEFT JOIN dim_clan c ON pc.clan_id = c.clan_id
         WHERE g.province_std = '{selected_province}'
         """
         
@@ -86,32 +107,64 @@ with tab_sim:
             st.info(f"**Data Timeframe Displayed:** {min_year} – {max_year}")
             
             raw_net['cand_name'] = raw_net['first_name'] + " " + raw_net['last_name']
-            cand_wins = raw_net['cand_name'].value_counts().to_dict()
-            family_wins = raw_net['last_name'].value_counts().to_dict()
+
+            # Aggregate per real person (person_id), not per name text -- a
+            # politician re-elected several times should count once, and two
+            # different people who happen to share a name should never merge.
+            per_person = raw_net.drop_duplicates(subset=['person_id']).set_index('person_id')
+            cand_wins = raw_net.groupby('person_id').size().to_dict()
+
+            # Clan info is already validated (same paternal line) -- no
+            # re-deriving "family" from last_name text here.
+            clan_info = (
+                per_person.dropna(subset=['clan_id'])
+                .groupby('clan_id')
+                .agg(clan_surname=('clan_surname', 'first'), clan_size=('clan_size', 'first'))
+            )
+            qualifying_clans = set(clan_info[clan_info['clan_size'] >= dynasty_threshold].index)
 
             G = nx.Graph()
-            
-            for family, f_wins in family_wins.items():
-                f_size = 20 + (f_wins * 2.5) 
-                G.add_node(family, node_type="dynasty", size=f_size, 
-                           title=f"Dynasty: {family}\nTotal Seats Held: {f_wins}",
-                           color={"background": "rgba(231, 76, 60, 0.3)", "border": "rgba(231, 76, 60, 0.1)", 
-                                  "highlight": {"background": "rgba(231, 76, 60, 1)", "border": "white"},
-                                  "hover": {"background": "rgba(231, 76, 60, 1)", "border": "white"}})
-                
-            unique_edges = raw_net[['last_name', 'cand_name']].drop_duplicates()
-            for _, r in unique_edges.iterrows():
-                family = r['last_name']
-                cand = r['cand_name']
-                c_wins = cand_wins[cand]
-                c_size = 10 + (c_wins * 2.5) 
-                
-                G.add_node(cand, node_type="candidate", size=c_size, 
+
+            for clan_id in qualifying_clans:
+                row = clan_info.loc[clan_id]
+                f_size = 20 + (row['clan_size'] * 2.5)
+                G.add_node(
+                    clan_id, node_type="dynasty", size=f_size,
+                    label=str(row['clan_surname']),
+                    title=f"Clan: {row['clan_surname']} ({clan_id})\nValidated Members: {int(row['clan_size'])}",
+                    color={"background": "rgba(231, 76, 60, 0.3)", "border": "rgba(231, 76, 60, 0.1)",
+                           "highlight": {"background": "rgba(231, 76, 60, 1)", "border": "white"},
+                           "hover": {"background": "rgba(231, 76, 60, 1)", "border": "white"}},
+                )
+
+            for person_id, row in per_person.iterrows():
+                clan_id = row['clan_id'] if pd.notna(row['clan_id']) else None
+                is_qualifying = clan_id in qualifying_clans
+
+                if show_only_dynasties and not is_qualifying:
+                    continue  # no validated relative, or clan below threshold -- skip entirely
+
+                cand = row['cand_name']
+                c_wins = cand_wins[person_id]
+                c_size = 10 + (c_wins * 2.5)
+
+                G.add_node(cand, node_type="candidate", size=c_size,
                            title=f"Candidate: {cand}\nTerms Won: {c_wins}",
-                           color={"background": "rgba(52, 152, 219, 0.3)", "border": "rgba(52, 152, 219, 0.1)", 
+                           color={"background": "rgba(52, 152, 219, 0.3)", "border": "rgba(52, 152, 219, 0.1)",
                                   "highlight": {"background": "rgba(52, 152, 219, 1)", "border": "white"},
                                   "hover": {"background": "rgba(52, 152, 219, 1)", "border": "white"}})
-                G.add_edge(family, cand)
+
+                if is_qualifying:
+                    G.add_edge(clan_id, cand)
+                # else: stands alone -- no validated dynasty to attach to,
+                # regardless of what their surname happens to be.
+
+            n_qualifying = len(qualifying_clans)
+            n_total_clans = len(clan_info)
+            st.caption(
+                f"**{n_qualifying} of {n_total_clans}** validated clans in this province meet the "
+                f"size threshold ({dynasty_threshold}+ members)."
+            )
 
             if k_core > 0:
                 G = nx.k_core(G, k=k_core) if len(G) > 0 else G
