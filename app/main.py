@@ -85,7 +85,7 @@ with tab_sim:
             g.town_std AS locality_std,
             pc.clan_id,
             c.clan_surname,
-            c.n_members AS clan_size
+            c.n_members AS clan_total_wins
         FROM fact_electoral_membership f
         JOIN dim_person p ON f.person_id = p.person_id
         JOIN dim_geography g ON f.location_id = g.location_id
@@ -113,7 +113,7 @@ with tab_sim:
             per_person = raw_net.drop_duplicates(subset=['person_id']).set_index('person_id')
             cand_wins = raw_net.groupby('person_id').size().to_dict()
 
-            # 1. Candidate Tooltips (Blue Nodes): Full record of won election years and positions
+            # 1. Candidate Career Histories
             candidate_histories = {}
             for pid, group in raw_net.groupby('person_id'):
                 sorted_records = group.sort_values(by='year')
@@ -123,22 +123,22 @@ with tab_sim:
                 ]
                 candidate_histories[pid] = "\n".join(history_lines)
 
-            clan_info = (
-                per_person.dropna(subset=['clan_id'])
-                .groupby('clan_id')
-                .agg(clan_surname=('clan_surname', 'first'), clan_size=('clan_size', 'first'))
-            )
-            qualifying_clans = set(clan_info[clan_info['clan_size'] >= dynasty_threshold].index)
+            # 2. Get distinct clans present in this jurisdiction
+            local_clan_ids = per_person['clan_id'].dropna().unique().tolist()
 
-            # 2. Nationwide Clan Query: Pull ALL members across all Philippine provinces for these clans
             clan_member_breakdowns = {}
             clan_actual_member_counts = {}
-            
-            if qualifying_clans:
-                clan_ids_str = "', '".join(qualifying_clans)
+            clan_surnames = {}
+            clan_total_wins_dict = {}
+
+            if local_clan_ids:
+                clan_ids_str = "', '".join(local_clan_ids)
+                
                 nw_query = f"""
                 SELECT 
                     pc.clan_id,
+                    c.clan_surname,
+                    c.n_members AS clan_total_wins,
                     p.person_id,
                     p.first_name,
                     p.last_name,
@@ -147,6 +147,7 @@ with tab_sim:
                     f.position,
                     f.year
                 FROM fact_person_clan pc
+                JOIN dim_clan c ON pc.clan_id = c.clan_id
                 JOIN dim_person p ON pc.person_id = p.person_id
                 LEFT JOIN fact_electoral_membership f ON p.person_id = f.person_id
                 LEFT JOIN dim_geography g ON f.location_id = g.location_id
@@ -157,12 +158,12 @@ with tab_sim:
                 nw_df['province_std'] = nw_df['province_std'].fillna("Unknown Province")
                 nw_df['full_name'] = nw_df['first_name'] + " " + nw_df['last_name']
 
-                for cid in qualifying_clans:
-                    c_rows = nw_df[nw_df['clan_id'] == cid]
-                    
-                    # Count distinct individuals
-                    clan_actual_member_counts[cid] = c_rows['person_id'].nunique()
-                    
+                for cid, c_rows in nw_df.groupby('clan_id'):
+                    real_member_count = c_rows['person_id'].nunique()
+                    clan_actual_member_counts[cid] = real_member_count
+                    clan_surnames[cid] = c_rows['clan_surname'].iloc[0]
+                    clan_total_wins_dict[cid] = int(c_rows['clan_total_wins'].iloc[0]) if pd.notna(c_rows['clan_total_wins'].iloc[0]) else len(c_rows)
+
                     members_summary = []
                     for pid, p_group in c_rows.groupby('person_id'):
                         p_name = p_group['full_name'].iloc[0]
@@ -180,20 +181,26 @@ with tab_sim:
                     
                     clan_member_breakdowns[cid] = "\n".join(members_summary)
 
+            # Filter clans strictly by true individual politicians (>= dynasty_threshold)
+            qualifying_clans = {
+                cid for cid, count in clan_actual_member_counts.items()
+                if count >= dynasty_threshold
+            }
+
             G = nx.Graph()
 
-            # 3. Build Clan (Red) Nodes with Corrected Dual-Metric Tooltip
+            # 3. Build Clan (Red) Nodes
             for clan_id in qualifying_clans:
-                row = clan_info.loc[clan_id]
-                f_size = 20 + (row['clan_size'] * 2.5)
-                
-                all_nationwide_members = clan_member_breakdowns.get(clan_id, "No members found")
+                c_name = clan_surnames.get(clan_id, clan_id)
                 actual_members = clan_actual_member_counts.get(clan_id, 0)
-                
+                tot_wins = clan_total_wins_dict.get(clan_id, 0)
+                f_size = 20 + (actual_members * 4.0)
+
+                all_nationwide_members = clan_member_breakdowns.get(clan_id, "No members found")
                 tooltip_clan = (
-                    f"CLAN: {row['clan_surname']} ({clan_id})\n"
+                    f"CLAN: {c_name} ({clan_id})\n"
                     f"Total Individual Politicians: {actual_members}\n"
-                    f"Total Elections Won: {int(row['clan_size'])}\n"
+                    f"Total Elections Won: {tot_wins}\n"
                     f"=========================================\n"
                     f"ALL NATIONWIDE MEMBERS, SEATS & LOCATIONS:\n"
                     f"{all_nationwide_members}"
@@ -203,14 +210,14 @@ with tab_sim:
                     clan_id, 
                     node_type="dynasty", 
                     size=f_size,
-                    label=str(row['clan_surname']),
+                    label=str(c_name),
                     title=tooltip_clan,
                     color={"background": "rgba(231, 76, 60, 0.3)", "border": "rgba(231, 76, 60, 0.1)",
                            "highlight": {"background": "rgba(231, 76, 60, 1)", "border": "white"},
                            "hover": {"background": "rgba(231, 76, 60, 1)", "border": "white"}}
                 )
 
-            # 4. Build Candidate (Blue) Nodes with Electoral Years & Positions Tooltip
+            # 4. Build Candidate (Blue) Nodes
             for person_id, row in per_person.iterrows():
                 clan_id = row['clan_id'] if pd.notna(row['clan_id']) else None
                 is_qualifying = clan_id in qualifying_clans
@@ -244,10 +251,10 @@ with tab_sim:
                     G.add_edge(clan_id, cand)
 
             n_qualifying = len(qualifying_clans)
-            n_total_clans = len(clan_info)
+            n_total_clans = len(local_clan_ids)
             st.caption(
-                f"**{n_qualifying} of {n_total_clans}** validated clans in this province meet the "
-                f"size threshold ({dynasty_threshold}+ members)."
+                f"**{n_qualifying} of {n_total_clans}** clans in this province meet the "
+                f"minimum dynasty threshold ({dynasty_threshold}+ unique politicians)."
             )
 
             if k_core > 0:
@@ -255,13 +262,18 @@ with tab_sim:
 
             initial_nodes = G.number_of_nodes()
 
+            # Disruption Simulation: Disqualify candidate nodes only
             num_to_remove = int(initial_nodes * (disruption_pct / 100.0))
             if num_to_remove > 0 and initial_nodes > 0:
+                candidate_nodes = [n for n, attr in G.nodes(data=True) if attr.get("node_type") == "candidate"]
+                
                 if "Targeted" in disruption_mode:
-                    sorted_nodes = sorted(G.degree, key=lambda x: x[1], reverse=True)
-                    nodes_to_remove = [n[0] for n in sorted_nodes[:num_to_remove]]
+                    sorted_cands = sorted(candidate_nodes, key=lambda c: G.degree(c), reverse=True)
+                    nodes_to_remove = sorted_cands[:num_to_remove]
                 else:
-                    nodes_to_remove = list(np.random.choice(list(G.nodes()), size=min(num_to_remove, len(G)), replace=False))
+                    sample_size = min(num_to_remove, len(candidate_nodes))
+                    nodes_to_remove = list(np.random.choice(candidate_nodes, size=sample_size, replace=False))
+                    
                 G.remove_nodes_from(nodes_to_remove)
 
             sub_col1, sub_col2, sub_col3, sub_col4 = st.columns(4)
