@@ -1,6 +1,7 @@
 import os
 import re
 import sys
+from itertools import combinations
 from pathlib import Path
 from dotenv import load_dotenv
 import numpy as np
@@ -21,6 +22,8 @@ PG_DB = os.getenv("POSTGRES_DB", "dynasty_db")
 PG_PORT = os.getenv("POSTGRES_PORT", "5432")
 PG_HOST = os.getenv("POSTGRES_HOST", "postgres")
 
+if PG_HOST == "postgres":
+    PG_HOST = "localhost"
 
 def pretty_name(name):
     """Title-case a person's name ('JOSEPH ESTRADA' -> 'Joseph Estrada'),
@@ -32,6 +35,60 @@ def pretty_name(name):
         w.upper() if re.fullmatch(r"(?i)(ii|iii|iv|vi{0,3}|ix)", w.strip(".,")) else w
         for w in words
     )
+
+
+def canonicalize_people(df, scope_col):
+    """Merge person_ids that are really the same human.
+
+    The same politician can arrive under several person_ids (e.g. one id for
+    their term as Councilor and another for their term as Vice Mayor). Two ids
+    are treated as one person when they have the same first name, last name and
+    suffix within the same scope (their clan if known, otherwise their town) AND
+    never hold different positions in the same year. A person can only hold one
+    seat per year, so a same-year clash means they are genuinely different people
+    and the ids are left alone.
+
+    Expects columns: person_id, first_name, last_name, name_suffix, year,
+    position, and `scope_col`.
+    """
+    if df.empty:
+        return df
+
+    d = df.copy()
+    norm = lambda s: s.fillna("").astype(str).str.strip().str.lower()
+    d["_key"] = (
+        norm(d["first_name"]) + "|" + norm(d["last_name"]) + "|"
+        + norm(d["name_suffix"]) + "|" + norm(d[scope_col])
+    )
+
+    remap = {}
+    for _, g in d.groupby("_key"):
+        ids = g["person_id"].unique()
+        if len(ids) < 2:
+            continue
+
+        # year -> set of positions held, for each candidate id
+        by_id = {}
+        for pid in ids:
+            sub = g[g["person_id"] == pid].dropna(subset=["year"])
+            seats = {}
+            for y, pos in zip(sub["year"].astype(int), sub["position"]):
+                seats.setdefault(y, set()).add(pos)
+            by_id[pid] = seats
+
+        # Same year but a different seat => two different people. Don't merge.
+        conflict = any(
+            by_id[a][y] != by_id[b][y]
+            for a, b in combinations(ids, 2)
+            for y in by_id[a].keys() & by_id[b].keys()
+        )
+        if not conflict:
+            canon = sorted(ids)[0]
+            remap.update({pid: canon for pid in ids})
+
+    if remap:
+        d["person_id"] = d["person_id"].replace(remap)
+    return d.drop(columns="_key")
 
 
 @st.cache_data
@@ -94,12 +151,12 @@ with tab_sim:
             p.person_id,
             p.last_name, 
             p.first_name, 
+            p.name_suffix,
             f.position, 
             f.year,
             g.town_std AS locality_std,
             pc.clan_id,
-            c.clan_surname,
-            c.n_members AS clan_total_wins
+            c.clan_surname
         FROM fact_electoral_membership f
         JOIN dim_person p ON f.person_id = p.person_id
         JOIN dim_geography g ON f.location_id = g.location_id
@@ -123,6 +180,12 @@ with tab_sim:
             
             raw_net['cand_name'] = raw_net['first_name'] + " " + raw_net['last_name']
             raw_net['locality_std'] = raw_net['locality_std'].fillna("Provincial / District Wide")
+
+            # Merge ids that are the same person elected to different positions
+            # (scope = their clan if they have one, otherwise their town).
+            raw_net['scope'] = raw_net['clan_id'].fillna(raw_net['locality_std'])
+            raw_net = canonicalize_people(raw_net, 'scope')
+            raw_net = raw_net.drop_duplicates(subset=['person_id', 'year', 'position'])
 
             per_person = raw_net.drop_duplicates(subset=['person_id']).set_index('person_id')
             cand_wins = raw_net.groupby('person_id').size().to_dict()
@@ -152,10 +215,10 @@ with tab_sim:
                 SELECT 
                     pc.clan_id,
                     c.clan_surname,
-                    c.n_members AS clan_total_wins,
                     p.person_id,
                     p.first_name,
                     p.last_name,
+                    p.name_suffix,
                     g.province_std,
                     g.town_std AS locality_std,
                     f.position,
@@ -172,11 +235,20 @@ with tab_sim:
                 nw_df['province_std'] = nw_df['province_std'].fillna("Unknown Province")
                 nw_df['full_name'] = nw_df['first_name'] + " " + nw_df['last_name']
 
+                # Same merge rule, scoped to the clan: one human = one member.
+                nw_df = canonicalize_people(nw_df, 'clan_id')
+
                 for cid, c_rows in nw_df.groupby('clan_id'):
                     real_member_count = c_rows['person_id'].nunique()
                     clan_actual_member_counts[cid] = real_member_count
                     clan_surnames[cid] = c_rows['clan_surname'].iloc[0]
-                    clan_total_wins_dict[cid] = int(c_rows['clan_total_wins'].iloc[0]) if pd.notna(c_rows['clan_total_wins'].iloc[0]) else len(c_rows)
+
+                    # Elections actually won = distinct (person, year, seat) records
+                    clan_total_wins_dict[cid] = (
+                        c_rows.dropna(subset=['year'])
+                        .drop_duplicates(subset=['person_id', 'year', 'position'])
+                        .shape[0]
+                    )
 
                     members_summary = []
                     for pid, p_group in c_rows.groupby('person_id'):
