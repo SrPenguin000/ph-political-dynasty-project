@@ -22,9 +22,6 @@ PG_DB = os.getenv("POSTGRES_DB", "dynasty_db")
 PG_PORT = os.getenv("POSTGRES_PORT", "5432")
 PG_HOST = os.getenv("POSTGRES_HOST", "postgres")
 
-if PG_HOST == "postgres":
-    PG_HOST = "localhost"
-
 def pretty_name(name):
     """Title-case a person's name ('JOSEPH ESTRADA' -> 'Joseph Estrada'),
     keeping roman-numeral suffixes (II, III, IV...) in capitals."""
