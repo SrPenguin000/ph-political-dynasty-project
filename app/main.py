@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 from pathlib import Path
 from dotenv import load_dotenv
@@ -19,6 +20,19 @@ PG_PASSWORD = os.getenv("POSTGRES_PASSWORD", "postgres")
 PG_DB = os.getenv("POSTGRES_DB", "dynasty_db")
 PG_PORT = os.getenv("POSTGRES_PORT", "5432")
 PG_HOST = os.getenv("POSTGRES_HOST", "postgres")
+
+
+def pretty_name(name):
+    """Title-case a person's name ('JOSEPH ESTRADA' -> 'Joseph Estrada'),
+    keeping roman-numeral suffixes (II, III, IV...) in capitals."""
+    if not isinstance(name, str):
+        return name
+    words = name.title().split(" ")
+    return " ".join(
+        w.upper() if re.fullmatch(r"(?i)(ii|iii|iv|vi{0,3}|ix)", w.strip(".,")) else w
+        for w in words
+    )
+
 
 @st.cache_data
 def fetch_data(query: str) -> pd.DataFrame:
@@ -166,7 +180,7 @@ with tab_sim:
 
                     members_summary = []
                     for pid, p_group in c_rows.groupby('person_id'):
-                        p_name = p_group['full_name'].iloc[0]
+                        p_name = pretty_name(p_group['full_name'].iloc[0])
                         positions = ", ".join(filter(None, p_group['position'].dropna().unique())) or "Elected Official"
                         
                         places = set()
@@ -189,9 +203,9 @@ with tab_sim:
 
             G = nx.Graph()
 
-            # 3. Build Clan (Red) Nodes
+            # 3. Build Clan (Red) Nodes -- ALL CAPS labels
             for clan_id in qualifying_clans:
-                c_name = clan_surnames.get(clan_id, clan_id)
+                c_name = str(clan_surnames.get(clan_id, clan_id)).upper()
                 actual_members = clan_actual_member_counts.get(clan_id, 0)
                 tot_wins = clan_total_wins_dict.get(clan_id, 0)
                 f_size = 20 + (actual_members * 4.0)
@@ -210,14 +224,14 @@ with tab_sim:
                     clan_id, 
                     node_type="dynasty", 
                     size=f_size,
-                    label=str(c_name),
+                    label=c_name,
                     title=tooltip_clan,
                     color={"background": "rgba(231, 76, 60, 0.3)", "border": "rgba(231, 76, 60, 0.1)",
                            "highlight": {"background": "rgba(231, 76, 60, 1)", "border": "white"},
                            "hover": {"background": "rgba(231, 76, 60, 1)", "border": "white"}}
                 )
 
-            # 4. Build Candidate (Blue) Nodes
+            # 4. Build Candidate (Blue) Nodes -- Title Case labels
             for person_id, row in per_person.iterrows():
                 clan_id = row['clan_id'] if pd.notna(row['clan_id']) else None
                 is_qualifying = clan_id in qualifying_clans
@@ -225,12 +239,13 @@ with tab_sim:
                 if show_only_dynasties and not is_qualifying:
                     continue
 
-                cand = row['cand_name']
+                cand = row['cand_name']          # node id (kept as-is for uniqueness)
+                cand_label = pretty_name(cand)   # what's displayed
                 c_wins = cand_wins[person_id]
                 c_size = 10 + (c_wins * 2.5)
 
                 tooltip_candidate = (
-                    f"CANDIDATE: {cand}\n"
+                    f"CANDIDATE: {cand_label}\n"
                     f"Total Terms Recorded: {c_wins}\n"
                     f"=========================================\n"
                     f"ELECTIONS WON & POSITIONS HELD:\n"
@@ -241,6 +256,7 @@ with tab_sim:
                     cand, 
                     node_type="candidate", 
                     size=c_size,
+                    label=cand_label,
                     title=tooltip_candidate,
                     color={"background": "rgba(52, 152, 219, 0.3)", "border": "rgba(52, 152, 219, 0.1)",
                            "highlight": {"background": "rgba(52, 152, 219, 1)", "border": "white"},

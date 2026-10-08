@@ -60,6 +60,8 @@ CREATE TABLE IF NOT EXISTS fact_electoral_membership (
     location_id INT REFERENCES dim_geography(location_id),
     year INT NOT NULL,
     position VARCHAR(150) NOT NULL,
+    party VARCHAR(150),
+    source VARCHAR(50),
     locality_source VARCHAR(50) NOT NULL,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT uq_membership_person_year_pos UNIQUE (person_id, year, position)
@@ -111,12 +113,12 @@ CREATE TABLE IF NOT EXISTS fact_poverty_metric (
 );
 
 -- ----------------------------------------------------------------------------
--- fact_person_clan: one row per HF-sourced politician who belongs to a
--- validated clan, from politicians.parquet (person_uid -> clan_id,
--- n_relatives). politicians.parquet spans HF + OpenHalalan + Roster
--- (person_uid), but dim_person currently only holds the HF-sourced subset,
--- so this table is loaded filtered to person_uid values prefixed "HF-",
--- with that prefix stripped to recover the matching dim_person.person_id.
+-- fact_person_clan: one row per HF-sourced and Ateneo-sourced politician who 
+-- belongs to a validated clan, from politicians.parquet (person_uid -> clan_id,
+-- n_relatives). politicians.parquet spans HF + OpenHalalan + Roster + Ateneo
+-- (person_uid). This table is loaded filtered to person_uid values prefixed 
+-- "HF-" and "AT-", with that prefix stripped to recover the matching 
+-- dim_person.person_id.
 -- A person with no row here, or with clan_id NULL, has no validated
 -- relative in the dataset -- NOT a dynasty, regardless of their surname.
 -- ----------------------------------------------------------------------------
@@ -126,6 +128,10 @@ CREATE TABLE IF NOT EXISTS fact_person_clan (
     n_relatives INT DEFAULT 0,
     has_relative_in_office BOOLEAN DEFAULT FALSE
 );
+
+-- For databases created before these columns existed (CREATE TABLE IF NOT EXISTS won't add them)
+ALTER TABLE fact_electoral_membership ADD COLUMN IF NOT EXISTS party VARCHAR(150);
+ALTER TABLE fact_electoral_membership ADD COLUMN IF NOT EXISTS source VARCHAR(50);
 
 -- ============================================================================
 -- 3. PERFORMANCE INDEXES

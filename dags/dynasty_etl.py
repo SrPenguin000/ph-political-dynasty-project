@@ -21,22 +21,39 @@ with DAG(
     tags=['ph_dynasty', 'postgres', 'etl'],
 ) as dag:
 
-    # 1. Run the core transformation script to produce *_clean.parquet staging files
+    # 1. Ingest raw data from APIs, Hugging Face, and local files
+    run_ingest_raw = BashOperator(
+        task_id='run_ingest_raw',
+        bash_command='cd /opt/airflow && python src/ingest/ingest_raw.py',
+    )
+
+    # 2. Extract and Parse PDF documents into structured CSV staging files
+    parse_psa = BashOperator(
+        task_id='parse_psa_poverty',
+        bash_command='cd /opt/airflow && python src/transform/parse_psa_poverty.py',
+    )
+
+    parse_roster = BashOperator(
+        task_id='parse_roster',
+        bash_command='cd /opt/airflow && python src/transform/parse_roster.py',
+    )
+
+    # 3. Run the core transformation script to produce *_clean.parquet staging files
     run_clean_backfill = BashOperator(
         task_id='run_clean_backfill',
         bash_command='cd /opt/airflow && python src/transform/clean_backfill.py',
     )
 
-    # 2. Define the notebooks that generate curated data
+    # 4. Define the notebooks that generate curated data
     notebooks = [
         "03_kinship_engine.ipynb",
         "04_dynasty_stronghold.ipynb",
-        "05_network_resilience.ipynb"
+        "05_network_resilience.ipynb",
     ]
 
     notebook_tasks = []
 
-    # 3. Dynamically generate a Bash task for each notebook
+    # 5. Dynamically generate a Bash task for each notebook
     for nb in notebooks:
         task_id = f"run_{nb.replace('.ipynb', '')}"
         
@@ -47,7 +64,7 @@ with DAG(
         )
         notebook_tasks.append(run_nb)
 
-    # 4. Define the downstream pipeline tasks
+    # 6. Define the downstream pipeline tasks
     run_dq_checks = BashOperator(
         task_id='run_data_quality_checks',
         bash_command='cd /opt/airflow && python src/validation/quality_checks.py',
@@ -58,11 +75,11 @@ with DAG(
         bash_command='cd /opt/airflow && python src/load/postgres_loader.py',
     )
 
-    # 5. Chain the pipeline in strict sequential order
-    run_clean_backfill >> notebook_tasks[0]
+    # 7. Chain the pipeline in strict sequential order
+    run_ingest_raw >> [parse_psa, parse_roster] >> run_clean_backfill >> notebook_tasks[0]
     
     for i in range(len(notebook_tasks) - 1):
         notebook_tasks[i] >> notebook_tasks[i + 1]
 
-    # 6. Connect the final notebook to the DQ checks and Data Warehouse load
+    # 8. Connect the final notebook to the DQ checks and Data Warehouse load
     notebook_tasks[-1] >> run_dq_checks >> load_data_warehouse

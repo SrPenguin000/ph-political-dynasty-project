@@ -193,10 +193,33 @@ class DataQualityChecker:
         )
         self._record("DQ-9: Ateneo Province Shares vs Recount", passed, details)
 
+    def check_curated_data_contract(self):
+        """DQ-10: Curated kinship/network outputs meet minimum size and coverage SLAs."""
+        terms_path = self.staging_dir / "politician_terms.parquet"
+        people_path = self.staging_dir / "politicians.parquet"
+
+        if not terms_path.exists() or not people_path.exists():
+            self._record("DQ-10: Curated Data Contract SLAs", False, "Curated network files missing.")
+            return
+
+        terms = pd.read_parquet(terms_path)
+        people = pd.read_parquet(people_path)
+
+        # 1. Row count assertion (> 300,000)
+        total_terms = len(terms)
+
+        # 2. Kinship coverage assertion (>= 25%)
+        kinship_rate = people["clan_id"].notna().mean()
+
+        passed = (total_terms > 300000) and (kinship_rate >= 0.25)
+        details = f"Total terms: {total_terms:,} (> 300k) | Kinship coverage: {kinship_rate:.1%} (>= 25%)"
+        self._record("DQ-10: Curated Data Contract SLAs", passed, details)
+
     def run_all(self) -> bool:
         print("\n" + "=" * 60)
         print("RUNNING AUTOMATED DATA QUALITY CHECKS")
         print("=" * 60)
+
         self.check_primary_key_uniqueness()
         self.check_referential_integrity()
         self.check_position_and_source_domains()
@@ -206,6 +229,7 @@ class DataQualityChecker:
         self.check_ateneo_keys_and_links()
         self.check_ateneo_towns()
         self.check_ateneo_province_shares()
+        self.check_curated_data_contract()
         print("=" * 60)
 
         all_passed = all(status == "PASSED" for _, status, _ in self.results)
