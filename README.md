@@ -210,12 +210,34 @@ flowchart LR
     C2 --> P4
 ```
 
-## G. Troubleshooting
+## G. Storage Format Benchmarking & Partitioning Strategy
+
+The Medallion Architecture's Staging (Silver) and Curated (Gold) local directories utilize Apache Parquet exclusively over CSV or JSON. This design choice optimizes I/O throughput and enforces strict data contracts before PostgreSQL ingestion.
+
+### Format Comparison
+
+| Feature | CSV | JSON | Columnar Parquet |
+| :--- | :--- | :--- | :--- |
+| **Schema Enforcement** | None (Inferred on read) | Weak (Nested structures) | **Strict (Embedded metadata)** |
+| **Storage Footprint** | Large (Uncompressed text) | Very Large (Repeated keys) | **Minimal (Snappy compression)** |
+| **I/O Performance** | Slow (Row-based full scans) | Very Slow (Tree traversal) | **Extremely Fast (Columnar chunking)** |
+| **Data Type Retention**| Fails on Null Ints/Booleans | Loses Datetime objects | **Preserves all pandas/SQL dtypes** |
+
+### Justification for Parquet
+1. **Type Safety for the Data Contract:** CSVs routinely corrupt nullable integers and boolean flags (e.g., arbitrarily converting an `is_dynastic` boolean to a `1.0`/`0.0` float). Parquet embeds the schema directly in the file, ensuring zero data mutation between the Python transformation steps and the PostgreSQL `INSERT` tasks.
+2. **Hardware Optimization:** Parquet's columnar compression minimizes disk reads and CPU deserialization overhead, maximizing throughput on modern NVMe SSD architectures during large data backfills.
+
+### Hive-Style Partitioning
+The pipeline saves curated datasets using temporal partitioning: `df.to_parquet(out, partition_cols=["year"])`. 
+* **Directory Structure:** This generates isolated physical folders such as `data/curated/town_dynasty_stronghold/year=2022/` and `year=2025/`.
+* **Partition Pruning (Predicate Pushdown):** Downstream analytical engines or dashboard queries targeting a specific election cycle only scan that specific directory chunk, entirely skipping decades of unrelated historical data. This drastically reduces memory overhead during UI rendering.
+
+## H. Troubleshooting
 
 * **Container Port Conflicts:** If `localhost:5432` or `8080` is already in use by a local PostgreSQL or Airflow installation, modify the left-side port bindings in `docker-compose.yml` (example: `"5433:5432"`).
 * **Silent Failures / Empty Dashboard:** If the DAG succeeds but the Streamlit dashboard fails to populate, check the `run_data_quality_checks` task logs in Airflow. The pipeline is designed to intentionally halt database ingestion if strict primary key or null constraint validations fail.
 
-## H. Future Improvements
+## I. Future Improvements
 
 * **Advanced Entity Resolution:** Implement fuzzy string matching (e.g., Levenshtein distance) to resolve persistent geographic `LEFT JOIN` anomalies between electoral datasets and the PSA poverty metrics.
 * **Graph Database Migration:** Transition the final curated Gold layer from PostgreSQL to a native graph database (Neo4j) to accelerate multi-hop kinship cascade queries.
