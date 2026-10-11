@@ -92,12 +92,130 @@ The pipeline is fully idempotent. Rerunning the DAG will safely overwrite local 
 
 3. **Interactive Analytics Dashboard:** Access the Streamlit dashboard at http://localhost:8501 to explore the output, featuring network resilience simulations and geographic stronghold phase-transition maps.
 
-## E. Troubleshooting
+## E. End-to-End Architecture
+
+```mermaid
+flowchart TD
+    subgraph EXT["External Sources"]
+        HF["Hugging Face API"]
+        GH["GitHub / OpenHalalan"]
+        AT["Ateneo Dynasties XLSX"]
+        PSA["PSA Poverty PDF"]
+        CON["House Roster PDF"]
+        WD["Wikidata SPARQL"]
+    end
+
+    subgraph DOCKER["Docker Container Environment"]
+        subgraph AIR["Apache Airflow: ph_dynasty_end_to_end_etl"]
+            T1["run_ingest_raw"]
+            T2["parse_roster"]
+            T3["parse_psa_poverty"]
+            T4["run_clean_backfill"]
+            T5["run_kinship_engine"]
+            T6["run_dynasty_stronghold"]
+            T7["run_network_resilience"]
+            T8["run_data_quality_checks"]
+            T9["load_data_warehouse"]
+        end
+
+        subgraph FS["Local File System Storage"]
+            RAW[("Raw<br/>CSV / PDF / JSON / XLSX")]
+            STAGE[("Staging<br/>Cleaned Parquet")]
+            CURATE[("Curated<br/>Partitioned Parquet")]
+        end
+
+        subgraph DW["Data Warehouse"]
+            PG[("PostgreSQL<br/>Star Schema")]
+        end
+
+        subgraph PRES["Presentation Layer"]
+            UI["Streamlit Dashboard<br/>PyVis Network"]
+        end
+    end
+
+    HF & GH & AT & PSA & CON & WD --> T1
+
+    %% Task order (Airflow dependencies)
+    T1 --> T2 & T3
+    T2 & T3 --> T4
+    T4 --> T5 --> T6 --> T7 --> T8 --> T9
+
+    %% Data written / read
+    T1 -.-> RAW
+    T2 & T3 & T4 & T5 -.-> STAGE
+    T6 & T7 -.-> CURATE
+    STAGE -.-> T8
+    STAGE -.-> T9
+    T9 --> PG
+    PG --> UI
+
+    classDef store fill:#e8f1ff,stroke:#3b6fd4,color:#111;
+    classDef task fill:#fff4e0,stroke:#d68a1c,color:#111;
+    class RAW,STAGE,CURATE,PG store;
+    class T1,T2,T3,T4,T5,T6,T7,T8,T9 task;
+```
+
+*Solid arrows between tasks are the Airflow dependencies. Dotted arrows show which storage layer each task writes to or reads from. Blue cylinders are storage; orange boxes are Airflow tasks.*
+
+## F. Data Lineage & Transformation Flow
+
+```mermaid
+flowchart LR
+    subgraph RAWL["Raw Layer"]
+        R1["bettergovph_raw.parquet"]
+        R2["ateneo_dynasties.xlsx"]
+        R3["openhalalan_winners.csv"]
+        R4["psa_poverty.pdf"]
+    end
+
+    subgraph STGL["Staging Layer (clean_backfill.py)"]
+        S1["hf_persons_clean.parquet"]
+        S2["ateneo_politicians_clean.parquet"]
+        S3["openhalalan_winners_clean.parquet"]
+    end
+
+    subgraph GRPH["Graph Engine (03_kinship_engine.ipynb)"]
+        G1["politicians.parquet"]
+        G2["kinship_edges.parquet"]
+        G3["clans.parquet"]
+        G4["politician_terms.parquet"]
+    end
+
+    subgraph CURL["Curated Layer (04_dynasty_stronghold + 05_network_resilience)"]
+        C1["official_terms_dynastic/<br/>year=YYYY/"]
+        C2["town_dynasty_stronghold/<br/>year=YYYY/"]
+        C3["clan_resilience.parquet"]
+    end
+
+    subgraph GOLD["Gold Layer (PostgreSQL)"]
+        P1[("dim_person")]
+        P2[("fact_electoral_membership")]
+        P3[("dim_clan")]
+        P4[("fact_town_stronghold")]
+    end
+
+    R1 --> S1
+    R2 --> S2
+    R3 --> S3
+
+    S1 & S2 & S3 --> G1 & G2 & G3 & G4
+
+    G1 & G2 & G4 --> C1
+    G3 & C1 --> C2
+    C1 & G1 & G3 & G2 --> C3
+
+    G1 --> P1
+    G3 --> P3
+    C1 --> P2
+    C2 --> P4
+```
+
+## G. Troubleshooting
 
 * **Container Port Conflicts:** If `localhost:5432` or `8080` is already in use by a local PostgreSQL or Airflow installation, modify the left-side port bindings in `docker-compose.yml` (example: `"5433:5432"`).
 * **Silent Failures / Empty Dashboard:** If the DAG succeeds but the Streamlit dashboard fails to populate, check the `run_data_quality_checks` task logs in Airflow. The pipeline is designed to intentionally halt database ingestion if strict primary key or null constraint validations fail.
 
-## F. Future Improvements
+## H. Future Improvements
 
 * **Advanced Entity Resolution:** Implement fuzzy string matching (e.g., Levenshtein distance) to resolve persistent geographic `LEFT JOIN` anomalies between electoral datasets and the PSA poverty metrics.
 * **Graph Database Migration:** Transition the final curated Gold layer from PostgreSQL to a native graph database (Neo4j) to accelerate multi-hop kinship cascade queries.
