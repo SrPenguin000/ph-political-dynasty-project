@@ -44,27 +44,23 @@ with DAG(
         bash_command='cd /opt/airflow && python src/transform/clean_backfill.py',
     )
 
-    # 4. Define the notebooks that generate curated data
-    notebooks = [
-        "03_kinship_engine.ipynb",
-        "04_dynasty_stronghold.ipynb",
-        "05_network_resilience.ipynb",
-    ]
+    # 4. Execute the curated data Python scripts (now in src/curate/)
+    run_kinship_engine = BashOperator(
+        task_id='run_kinship_engine',
+        bash_command='cd /opt/airflow && python src/curate/03_kinship_engine.py',
+    )
 
-    notebook_tasks = []
+    run_dynasty_stronghold = BashOperator(
+        task_id='run_dynasty_stronghold',
+        bash_command='cd /opt/airflow && python src/curate/04_dynasty_stronghold.py',
+    )
 
-    # 5. Dynamically generate a Bash task for each notebook
-    for nb in notebooks:
-        task_id = f"run_{nb.replace('.ipynb', '')}"
-        
-        # Combine the installation and execution into a single, bulletproof bash command
-        run_nb = BashOperator(
-            task_id=task_id,
-            bash_command=f"python -m pip install nbconvert ipykernel networkx scipy && cd /opt/airflow/notebooks && python -m nbconvert --execute --inplace {nb}",
-        )
-        notebook_tasks.append(run_nb)
+    run_network_resilience = BashOperator(
+        task_id='run_network_resilience',
+        bash_command='cd /opt/airflow && python src/curate/05_network_resilience.py',
+    )
 
-    # 6. Define the downstream pipeline tasks
+    # 5. Define the downstream pipeline tasks
     run_dq_checks = BashOperator(
         task_id='run_data_quality_checks',
         bash_command='cd /opt/airflow && python src/validation/quality_checks.py',
@@ -75,11 +71,7 @@ with DAG(
         bash_command='cd /opt/airflow && python src/load/postgres_loader.py',
     )
 
-    # 7. Chain the pipeline in strict sequential order
-    run_ingest_raw >> [parse_psa, parse_roster] >> run_clean_backfill >> notebook_tasks[0]
-    
-    for i in range(len(notebook_tasks) - 1):
-        notebook_tasks[i] >> notebook_tasks[i + 1]
-
-    # 8. Connect the final notebook to the DQ checks and Data Warehouse load
-    notebook_tasks[-1] >> run_dq_checks >> load_data_warehouse
+    # 6. Chain the pipeline in strict sequential order
+    run_ingest_raw >> [parse_psa, parse_roster] >> run_clean_backfill
+    run_clean_backfill >> run_kinship_engine >> run_dynasty_stronghold >> run_network_resilience
+    run_network_resilience >> run_dq_checks >> load_data_warehouse
