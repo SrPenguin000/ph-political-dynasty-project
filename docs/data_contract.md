@@ -1,43 +1,32 @@
-## 1. Pipeline Ownership & Service Level Agreement
-* **Project:** Philippine Political Dynasty Analytics & Network Resilience Pipeline
-* **Owner:** Team Alpha
-* **Execution Engine:** Apache Airflow (`ph_dynasty_end_to_end_etl`)
-* **Cadence:** Ad-hoc / Manual Trigger (Historical static datasets)
-* **Target Destination:** PostgreSQL Database (`dynasty_db`)
+# Data Contract
 
-## 2. Upstream Data Sources & Ingestion Guarantees
-The pipeline depends on the following external sources. If a source API or endpoint fails, the pipeline will fall back to local cached `.parquet` or `.csv` stubs if `ALLOW_FALLBACK=1`.
+This contract defines the strict SLA and data quality constraints enforced by `src/validation/quality_checks.py` prior to the PostgreSQL `load_data_warehouse` execution.
 
-| Source System | Format | Expected Volume | Owner / Provider |
-| :--- | :--- | :--- | :--- |
-| BetterGov.PH Dataset | Parquet | ~130,000 rows | Hugging Face Hub |
-| Ateneo Policy Center Dataset (2022) | Excel (`.xlsx`) | ~207,000 rows | Ateneo School of Government |
-| OpenHalalan Dataset | CSV | ~150,000 rows | GitHub Releases |
-| PSA OpenSTAT Poverty | JSON | 82 Provincial records | PSA API Endpoint |
+## 1. Delivery & Cadence
 
-## 3. Staging Data Schema (Input to PostgreSQL Loader)
-Before data is loaded into PostgreSQL, the transformation layer (`clean_backfill.py`) guarantees the following cleaned standard output structure in the curated `.parquet` files:
+* **Trigger:** Apache Airflow DAG (`ph_dynasty_end_to_end_etl`).
+* **Schedule:** `@monthly` execution to capture asynchronous API updates, COMELEC dispute resolutions, and special election results.
+* **Idempotency Guarantee:** Upstream pipelines must write to local storage using Parquet partitions (`partition_cols=["year"]`). The PostgreSQL loader must utilize `ON CONFLICT DO UPDATE` (Upsert) logic for dimensions and `DELETE FROM ... WHERE year = X` before inserting fact partitions to prevent data duplication on reruns.
 
-### Curated Politicians (`curated_politicians.parquet`)
-| Column | Data Type | Constraint |
-| :--- | :--- | :--- |
-| `person_id` | STRING | NOT NULL, UNIQUE, Primary Key format (UUID) |
-| `first_name` | STRING | NOT NULL, UPPERCASE |
-| `last_name` | STRING | NOT NULL, UPPERCASE |
+## 2. Schema & Type Enforcement
 
-### Curated Memberships (`curated_memberships.parquet`)
-| Column | Data Type | Constraint |
-| :--- | :--- | :--- |
-| `person_id` | STRING | NOT NULL, Foreign Key to `person_id` |
-| `year` | INTEGER | NOT NULL, BETWEEN 1900 AND 2025 |
-| `position` | STRING | NOT NULL, Standardized title (e.g., "MAYOR") |
-| `province_std` | STRING | NOT NULL, UPPERCASE |
-| `town_std` | STRING | NOT NULL, UPPERCASE, Defaults to "PROVINCIAL WIDE" |
-| `source` | STRING | Enum: `HF`, `ATENEO_2022`, `OPENHALALAN` |
+Data types exported from `pandas` must strict-cast to the database schema defined in the Data Dictionary.
 
-## 4. Quality Rules & Thresholds (`quality_checks.py`)
-The pipeline will abort and log a failure if the following data assertions are not met post-transformation:
-1. **Row Count Assertion:** Curated membership records must exceed 300,000 total rows after combining Ateneo, HF, and OpenHalalan data.
-2. **Deduplication:** Overlapping election years (e.g., 2004–2016) must not produce duplicate `(person_id, position, year, town_std)` entries.
-3. **Geographic Nulls:** `province_std` cannot contain nulls. Missing municipalities must be coerced to `PROVINCIAL WIDE`.
-4. **Kinship Coverage:** At least 25% of unique individuals must successfully map to a `clan_id` via the network graph logic.
+* **No Implicit Type Casting:** Dates and years must evaluate to valid integers.
+* **Boolean Flags:** All dynasty flags (`is_dynastic`, `is_fat_dynasty`, `mayor_dynastic`) must cast correctly to SQL `BOOLEAN` (True/False, not 1/0 strings).
+
+## 3. Nullability & Uniqueness Constraints
+
+If any of the following constraints are violated, the Airflow validation task will fail and abort the database load:
+
+* **Primary Key Uniqueness:** `person_uid` in `dim_person` and `clan_id` in `dim_clan` must be strictly unique.
+* **Mandatory Fields (Not Null):**
+  * `year`, `position`, `province_std`, and `person_uid` must not contain nulls in `fact_electoral_membership`.
+  * `display_name` must not be null in `dim_person`.
+* **Foreign Key Referential Integrity:** Every `person_uid` present in `fact_electoral_membership` must exist in `dim_person`. Every `clan_id` assigned in `dim_person` must exist in `dim_clan`.
+
+## 4. Business Logic Validation
+
+* **Valid Years:** The `year` column in fact tables must only contain established Philippine election years within the scope (1988, 1992, 1995, 1998, 2001, 2004, 2007, 2010, 2013, 2016, 2019, 2022, 2025) or historical roster years >= 1907.
+* **Position Vocabulary:** The `position` column must strictly conform to expected categorical titles (e.g., `MAYOR`, `VICE MAYOR`, `COUNCILOR`, `GOVERNOR`, `VICE GOVERNOR`, `PROVINCIAL BOARD MEMBER`, `MEMBER, HOUSE OF REPRESENTATIVES`).
+* **Share Boundaries:** Columns representing percentages (`dynastic_share`, `top_clan_share`, `provincial_dynastic_share`) must evaluate to floats between `0.0` and `1.0`.
