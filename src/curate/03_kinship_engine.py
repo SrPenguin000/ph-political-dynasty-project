@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 import networkx as nx
 from scipy.stats import poisson
-sys.path.insert(0, "..")
+sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[2]))
 from src.transform.normalize import name_key, name_tokens
 
 S = "data/staging/"
